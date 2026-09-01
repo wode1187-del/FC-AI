@@ -1,0 +1,66 @@
+{
+    "name":  "fc-ai-image-workbench",
+    "private":  true,
+    "version":  "1.2.0",
+    "type":  "module",
+    "scripts":  {
+                    "dev":  "vite",
+                    "build":  "vite build",
+                    "preview":  "vite preview",
+                    "build:check":  "tsc \u0026\u0026 vite build"
+                },
+    "dependencies":  {
+                         "@lark-apaas/client-toolkit-lite":  "file:./mock-packages/@lark-apaas/client-toolkit-lite",
+                         "@radix-ui/react-dialog":  "^1.1.23",
+                         "@radix-ui/react-label":  "^2.1.15",
+                         "@radix-ui/react-select":  "^2.3.7",
+                         "@radix-ui/react-slider":  "^1.4.7",
+                         "@radix-ui/react-slot":  "^1.3.3",
+                         "@radix-ui/react-switch":  "^1.3.7",
+                         "@radix-ui/react-tabs":  "^1.1.21",
+                         "@tailwindcss/postcss":  "^4.3.3",
+                         "@tailwindcss/typography":  "^0.5.15",
+                         "autoprefixer":  "^10.5.4",
+                         "class-variance-authority":  "^0.7.1",
+                         "clsx":  "^2.1.1",
+                         "date-fns":  "^4.4.0",
+                         "lucide-react":  "^1.34.0",
+                         "postcss":  "^8.5.26",
+                         "react":  "^18.2.0",
+                         "react-dom":  "^18.2.0",
+                         "react-error-boundary":  "^6.1.3",
+                         "react-router-dom":  "^7.18.2",
+                         "sonner":  "^2.0.8",
+                         "tailwind-merge":  "^3.6.0",
+                         "tailwindcss":  "^4.3.3",
+                         "tw-animate-css":  "^1.4.0"
+                     },
+    "devDependencies":  {
+                            "@types/react":  "^18.2.0",
+                            "@types/react-dom":  "^18.2.0",
+                            "@vitejs/plugin-react":  "^4.2.0",
+                            "typescript":  "^5.3.0",
+                            "vite":  "^5.0.0"
+                        },
+    "description":  "FC内部AI生图工作台 - A powerful local AI image generation workbench with multi-model support, batch generation, and reference image editing.",
+    "license":  "MIT",
+    "author":  "FC Photography",
+    "keywords":  [
+                     "ai-image-generation",
+                     "image-generation",
+                     "gpt-image",
+                     "text-to-image",
+                     "image-to-image",
+                     "batch-generation",
+                     "react",
+                     "vite"
+                 ],
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/wode1187-del/FC-AI.git"
+                   },
+    "bugs":  {
+                 "url":  "https://github.com/wode1187-del/FC-AI/issues"
+             },
+    "homepage":  "https://github.com/wode1187-del/FC-AI#readme"
+}
