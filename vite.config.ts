@@ -8,7 +8,7 @@ export default defineConfig(({ command }) => {
   const isBuild = command === 'build'
   return {
     plugins: [react()],
-    base: isBuild ? '/FC-AI/' : '/',
+    base: './',
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
