@@ -1305,13 +1305,41 @@ export default function TaskTable() {
                         return (
                           <div
                             key={img.id}
-                            className={`flex flex-col rounded-md border-2 transition-all group ${allDownloaded ? 'border-success bg-success/5' : 'border-border bg-card hover:border-primary/40'}`}
+                            className={`flex flex-col rounded-md border-2 transition-all group cursor-zoom-in ${allDownloaded ? 'border-success bg-success/5' : 'border-border bg-card hover:border-primary/40'}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPreviewImage({
+                                url: img.url,
+                                name: `生成图 #${task.index}-${imgIdx + 1}`,
+                                taskId: task.id,
+                                resultId: img.id,
+                                taskIndex: task.index,
+                                resultIndex: imgIdx,
+                                isResult: true,
+                                downloadedJpg: img.downloadedJpg,
+                                downloadedPng: img.downloadedPng,
+                              });
+                            }}
                           >
-                            {/* 图片区 - 固定比例容器防布局跳动 */}
-                            <div className="relative aspect-[3/4] overflow-hidden rounded-t-sm bg-muted/30">
-                              {/* 加载中占位 - 仅在图片未加载完成时显示 */}
+                            {/* 图片区 */}
+                            <div className="relative aspect-[3/4] overflow-hidden rounded-t-sm bg-muted/30 pointer-events-none">
+                              {/* 直接显示图片 - pointer-events-none 跟参考图一样 */}
+                              <Image
+                                src={imgReloadKeys[img.id] ? `${img.url}${img.url.includes('?') ? '&' : '?'}_t=${imgReloadKeys[img.id]}` : img.url}
+                                alt={`结果${imgIdx + 1}`}
+                                loading="lazy"
+                                decoding="async"
+                                className="w-full h-full object-cover hover:scale-105 transition-transform duration-300 bg-card pointer-events-none"
+                                onLoad={() => {
+                                  setImgLoaded((prev) => ({ ...prev, [img.id]: true }));
+                                }}
+                                onError={() => {
+                                  setImgLoadErrors((prev) => ({ ...prev, [img.id]: true }));
+                                }}
+                              />
+                              {/* 加载中占位 */}
                               {!imgLoaded[img.id] && !imgLoadErrors[img.id] && (
-                                <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                                   <div className="size-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                                 </div>
                               )}
@@ -1332,7 +1360,6 @@ export default function TaskTable() {
                                         delete next[img.id];
                                         return next;
                                       });
-                                      // 强制重新加载：给 src 加时间戳参数
                                       setImgReloadKeys((prev) => ({ ...prev, [img.id]: Date.now() }));
                                     }}
                                     className="text-[10px] px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
@@ -1341,45 +1368,20 @@ export default function TaskTable() {
                                   </button>
                                 </div>
                               )}
-                              {/* 直接显示图片 - 浏览器原生加载，边下载边显示 */}
-                              <Image
-                                src={imgReloadKeys[img.id] ? `${img.url}${img.url.includes('?') ? '&' : '?'}_t=${imgReloadKeys[img.id]}` : img.url}
-                                alt={`结果${imgIdx + 1}`}
-                                loading="lazy"
-                                decoding="async"
-                                className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-300 bg-card"
-                                onLoad={() => {
-                                  setImgLoaded((prev) => ({ ...prev, [img.id]: true }));
-                                }}
-                                onError={() => {
-                                  setImgLoadErrors((prev) => ({ ...prev, [img.id]: true }));
-                                }}
-                                onClick={() => setPreviewImage({
-                                  url: img.url,
-                                  name: `生成图 #${task.index}-${imgIdx + 1}`,
-                                  taskId: task.id,
-                                  resultId: img.id,
-                                  taskIndex: task.index,
-                                  resultIndex: imgIdx,
-                                  isResult: true,
-                                  downloadedJpg: img.downloadedJpg,
-                                  downloadedPng: img.downloadedPng,
-                                })}
-                              />
                               {/* 左上角已下载标签 */}
                               {anyDownloaded && (
-                                <div className="absolute top-1 left-1 flex items-center gap-0.5 bg-success text-white text-[9px] px-1.5 py-0.5 rounded-full z-10 shadow-sm font-medium">
+                                <div className="absolute top-1 left-1 flex items-center gap-0.5 bg-success text-white text-[9px] px-1.5 py-0.5 rounded-full z-10 shadow-sm font-medium pointer-events-none">
                                   <CheckCircle2 className="size-2.5" />
                                   <span className="hidden sm:inline">已下载</span>
                                 </div>
                               )}
                               {/* 右上角序号徽章 */}
-                              <div className="absolute top-1 right-1 size-5 rounded-full bg-white/95 text-foreground text-[10px] font-bold flex items-center justify-center z-10 shadow-sm">
+                              <div className="absolute top-1 right-1 size-5 rounded-full bg-white/95 text-foreground text-[10px] font-bold flex items-center justify-center z-10 shadow-sm pointer-events-none">
                                 {imgIdx + 1}
                               </div>
                               {/* hover 时显示下载按钮 */}
-                              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-end justify-center opacity-0 group-hover:opacity-100 z-20">
-                                <div className="flex gap-1 pb-1.5 w-full px-1">
+                              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-end justify-center opacity-0 group-hover:opacity-100 z-20 pointer-events-none">
+                                <div className="flex gap-1 pb-1.5 w-full px-1 pointer-events-auto">
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
@@ -1412,7 +1414,7 @@ export default function TaskTable() {
                               </div>
                             </div>
                             {/* 操作按钮区 */}
-                            <div className="p-1.5 space-y-1">
+                            <div className="p-1.5 space-y-1 pointer-events-auto">
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();

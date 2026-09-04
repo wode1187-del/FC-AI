@@ -593,6 +593,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (qualityLower.includes('high') || qualityLower.includes('quality') || qualityLower.includes('质量')) {
           body.quality = 'high';
         }
+      } else if (presetKey?.startsWith('grok')) {
+        // Grok Imagine: 质量选项 1K/2K 映射到 resolution 参数
+        if (qualityLower.includes('2k') || qualityLower.includes('2K')) {
+          body.resolution = '2k';
+        } else {
+          body.resolution = '1k';
+        }
+        // quality 默认 medium
+        body.quality = 'medium';
+      } else if (presetKey?.startsWith('wan')) {
+        // Wan 2.7: quality = standard / high
+        if (qualityLower.includes('high') || qualityLower.includes('高') || qualityLower.includes('超清')) {
+          body.quality = 'high';
+        } else {
+          body.quality = 'standard';
+        }
       }
 
       // 负向提示词
@@ -767,16 +783,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           if (hasV1Suffix) {
             return [
               `${rawBaseUrl}/images/edits`,
-              `${rawBaseUrl}/images/edit`,
               `${baseWithoutV1}/v1/images/edits`,
-              `${baseWithoutV1}/v1/images/edit`,
             ];
           }
           return [
             `${rawBaseUrl}/v1/images/edits`,
             `${rawBaseUrl}/images/edits`,
-            `${rawBaseUrl}/v1/images/edit`,
-            `${rawBaseUrl}/images/edit`,
           ];
         };
 
@@ -2209,7 +2221,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   function matchModelPresetKey(modelIdOrName: string): string | null {
     const lower = modelIdOrName.toLowerCase().replace(/_/g, '-');
     // 精确匹配（去掉 api-xxx- 前缀后）
-    const baseId = lower.replace(/^api-[^-]+-/, '');
+    const baseId = lower.replace(/^api-[^_-]+[_-]/, '');
     if (MODEL_RESOLUTIONS[baseId]) return baseId;
     if (MODEL_RESOLUTIONS[lower]) return lower;
     // 模糊匹配 —— 更具体的放前面
@@ -2228,6 +2240,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
     if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
     if (lower.includes('flux')) return 'flux-1.1-pro';
+    // Wan 2.7 系列
+    if (lower.includes('wan-2.7-global-i2i-pro') || lower.includes('wan2.7-i2i-pro')) return 'wan-2.7-global-i2i-pro';
+    if (lower.includes('wan-2.7-global-i2i') || lower.includes('wan2.7-i2i')) return 'wan-2.7-global-i2i';
+    if (lower.includes('wan-2.7-global-t2i') || lower.includes('wan2.7-t2i')) return 'wan-2.7-global-t2i';
+    if (lower.includes('wan')) return 'wan-2.7-global-i2i';
+    // Grok Imagine 系列
+    if (lower.includes('grok-imagine-image-2.0') || lower.includes('grok-imagine-2') || lower.includes('grok2')) return 'grok-imagine-image-2.0';
+    if (lower.includes('grok-imagine') || lower.includes('grok')) return 'grok-imagine-image-2.0';
     return null;
   }
 
