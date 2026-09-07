@@ -490,7 +490,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const task = tasks.find(t => t.id === taskId);
     if (!task || !task.prompt.trim()) return;
 
-    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'generating', errorMsg: undefined, startedAt: Date.now(), completedAt: undefined, durationMs: undefined } : t));
+    // 追加模式：记录本次追加张数，更新总张数用于占位框显示
+    const appendCount = task.imageCount || 1;
+    const requestedCount = append ? appendCount : (task.imageCount || 1);  // 本次实际请求的张数
+    const totalImageCount = append ? task.results.length + appendCount : (task.imageCount || 1);
+
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'generating', imageCount: totalImageCount, errorMsg: undefined, startedAt: Date.now(), completedAt: undefined, durationMs: undefined } : t));
 
     const generateStartTime = Date.now();
 
@@ -570,7 +575,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const body: Record<string, unknown> = {
         model: realModelId,
         prompt: task.prompt,
-        n: task.imageCount || 1,
+        n: append ? appendCount : (task.imageCount || 1),
       };
 
       // 自适应尺寸不传 size，其他情况传
@@ -1363,6 +1368,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       fd.append('mask', mask, mask.name);
                     }
 
+                    // 图生图关键参数：mode + image_weight（seedream/wan等模型需要）
+                    if (isGenEndpoint) {
+                      fd.append('mode', 'image-to-image');
+                      fd.append('image_weight', strength);
+                    } else if (isEditEndpoint) {
+                      fd.append('strength', strength);
+                    }
+
                     // variations 端点不需要 prompt
                     if (!isVarEndpoint && attempt.extraParams.__useMask !== 'true' ? true : !isVarEndpoint) {
                       let promptText = String(variant.body.prompt || '');
@@ -1426,6 +1439,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       });
                       // 第一张也用原字段名保留
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
+                    }
+                    // 图生图关键参数：mode + image_weight（seedream/wan等模型需要，否则会被当文生图忽略参考图）
+                    if (isGenEndpoint) {
+                      jsonBody.mode = 'image-to-image';
+                      jsonBody.image_weight = strength;
+                    } else if (isEditEndpoint) {
+                      jsonBody.strength = strength;
                     }
                     requestHeaders['Content-Type'] = 'application/json';
                     // eslint-disable-next-line no-console
@@ -1763,8 +1783,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       // ===== 数量不足补齐：只要请求张数 > 已返回张数，就强制循环请求剩余张数 =====
       // 注意：补齐时 n=1，其他所有参数（含参考图）与成功请求保持完全一致
-      const expectedCount = task.imageCount || 1;
-      logger.info(`${debugPrefix} 📊 补齐检查：images.length=${images.length}, expectedCount=${expectedCount}, successEndpoint=${successEndpoint || '(空)'}`);
+      const expectedCount = requestedCount;  // 用本次实际请求张数，避免追加模式下多扣费
+      logger.info(`${debugPrefix} 📊 补齐检查：images.length=${images.length}, expectedCount=${expectedCount}(请求n=${requestedCount}, 总imageCount=${task.imageCount}), successEndpoint=${successEndpoint || '(空)'}`);
       if (images.length > 0 && images.length < expectedCount) {
         const remaining = expectedCount - images.length;
         // 如果 successEndpoint 为空，使用第一个端点兜底
