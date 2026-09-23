@@ -1,4 +1,4 @@
-﻿import { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { scopedStorage, logger } from '@lark-apaas/client-toolkit-lite';
 import { toast } from 'sonner';
 import type { IProject, ITask, IApiConfig, IModel, IPreset, ITextOptimizeConfig } from '@/data/models';
@@ -10,6 +10,7 @@ import {
   MOCK_API_CONFIGS,
   MODEL_RESOLUTIONS,
   MODEL_QUALITIES,
+  MODEL_BACKGROUNDS,
 } from '@/data/models';
 
 // Storage keys
@@ -142,6 +143,7 @@ interface AppContextType {
   addCustomModel: (apiId: string, modelId: string, modelName?: string) => void;
   getResolutionsForModel: (modelId: string) => string[];
   getQualitiesForModel: (modelId: string) => string[];
+    getBackgroundsForModel: (modelId: string) => string[];
 
   // API Configs
   apiConfigs: IApiConfig[];
@@ -200,7 +202,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 所有模型：内置 + 从 API 加载的
   const allModels = useMemo<IModel[]>(() => [...MOCK_MODELS, ...customLoadedModels], [customLoadedModels]);
 
-  const [activeModels, setActiveModelsState] = useState<IModel[]>(() => safeParse(scopedStorage.getItem(KEY_ACTIVE_MODELS), MOCK_MODELS.filter(m => m.isActive)));
+  const [activeModels, setActiveModelsState] = useState<IModel[]>(() => {
+    const cached = safeParse<IModel[]>(scopedStorage.getItem(KEY_ACTIVE_MODELS), []);
+    const mockActive = MOCK_MODELS.filter(m => m.isActive);
+    if (cached && Array.isArray(cached) && cached.length > 0) {
+      // 同步内置模型(MOCK, isCustom=false)的最新定义：内置模型随版本更新即时生效，
+      // 用户自定义模型(isCustom=true)原样保留，避免缓存里的旧内置数据掩盖修复/新模型
+      const merged = cached.map(m => {
+        const mock = mockActive.find(mm => mm.id === m.id && !mm.isCustom);
+        return mock ? { ...m, ...mock } : m;
+      });
+      mockActive.forEach(mm => {
+        if (!merged.some(m => m.id === mm.id)) merged.push(mm);
+      });
+      return merged;
+    }
+    return mockActive;
+  });
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
@@ -485,6 +503,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return modelId;
   };
 
+
   // ---- Generate ----
   const generateTask = useCallback(async (taskId: string, append = false) => {
     const task = tasks.find(t => t.id === taskId);
@@ -513,6 +532,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const debugPrefix = `[生成调试 #${task.index}]`;
     // eslint-disable-next-line no-console
     logger.info(`${debugPrefix} ========== 开始生成 ==========`);
+      logger.info(`${debugPrefix} 📌 版本标记: v1.3.2-gpt25-fix`);
     // eslint-disable-next-line no-console
     logger.info(`${debugPrefix} 任务ID:`, String(task.id));
     // eslint-disable-next-line no-console
@@ -567,7 +587,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       logger.info(`${debugPrefix} 解析出的尺寸:`, String({ width, height, sizeStr }));
 
       // 检查是否是"自适应尺寸"，如果是则不传 size
-      const isAutoSize = task.ratio.includes('自适应') || task.ratio.includes('自动');
+      let isAutoSize = task.ratio.includes('自适应') || task.ratio.includes('自动') || task.ratio.includes('自由尺寸') || task.ratio.includes('由模型决定');
+      // 自动检测：模型名已包含分辨率标识（-1k/-2k/-3k/-4k/-1080p/-2160p/-hd/-fhd等）时，不传size参数
+      const modelHasResolutionSuffix = /-(1k|2k|3k|4k|1080p|2160p|720p|480p|hd|fhd|uhd|qhd)(?=[-_]|$)/i.test(realModelId);
+      if (modelHasResolutionSuffix && !isAutoSize) {
+        isAutoSize = true;
+        // eslint-disable-next-line no-console
+        logger.info(`${debugPrefix} 🔧 模型名已含分辨率标识(${realModelId})，自动跳过size参数，避免平台重复附加分辨率`);
+      }
       // eslint-disable-next-line no-console
       logger.info(`${debugPrefix} 是否自适应尺寸:`, String(isAutoSize));
 
@@ -578,25 +605,64 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         n: append ? appendCount : (task.imageCount || 1),
       };
 
-      // 自适应尺寸不传 size，其他情况传
-      if (!isAutoSize) {
-        body.size = sizeStr;
+      const presetKey = matchModelPresetKey(task.model);
+      const isGoogleModel = presetKey?.startsWith('nano-banana') || presetKey?.startsWith('gemini');
+
+      // 自适应尺寸不传 size；Google Gemini/Nano Banana 官方用 image_size+aspect_ratio，不用 size
+      if (!isAutoSize && !isGoogleModel) {
+        if (presetKey?.startsWith('wan')) {
+          // Wan 2.7 官方推荐缩写档位 1K/2K/4K（T2I 可 4K，I2I 最高 2K）
+          const wm = task.ratio.match(/^(\d+(?:\.\d+)?K)/);
+          if (wm) body.size = wm[1];
+        } else {
+          body.size = sizeStr;
+        }
+      }
+      if (!isAutoSize && isGoogleModel) {
+        const gm = task.ratio.match(/^(\d+(?:\.\d+)?K)\s*·\s*(\d+:\d+)/);
+        if (gm) {
+          body.image_size = gm[1];
+          body.aspect_ratio = gm[2];
+        }
       }
 
       // 质量参数：不同 API 格式不同，按模型类型适配
-      const presetKey = matchModelPresetKey(task.model);
       const qualityLower = task.quality.toLowerCase();
       if (presetKey === 'gpt-image-2') {
-        // OpenAI GPT Image: quality = standard / hd
+        // OpenAI GPT Image 2: quality = low / medium / high (官方支持集，非 dall-e 的 hd/standard)
         if (qualityLower.includes('high') || qualityLower.includes('hd') || qualityLower.includes('无损')) {
-          body.quality = 'hd';
-        } else {
-          body.quality = 'standard';
-        }
-      } else if (presetKey?.startsWith('flux')) {
-        // FLUX 系列部分接口支持 quality 参数
-        if (qualityLower.includes('high') || qualityLower.includes('quality') || qualityLower.includes('质量')) {
           body.quality = 'high';
+        } else if (qualityLower.includes('low') || qualityLower.includes('低') || qualityLower.includes('快速')) {
+          body.quality = 'low';
+        } else {
+          body.quality = 'medium';
+        }
+      } else if (presetKey === 'gpt-image-2.5-flare' || presetKey === 'gpt-image-2.5-sunburst') {
+        // GPT Image 2.5: quality = auto / low / medium / high / xhigh / max
+        if (qualityLower.includes('max') || qualityLower.includes('最高')) {
+          body.quality = 'max';
+        } else if (qualityLower.includes('xhigh') || qualityLower.includes('超高') || qualityLower.includes('x-high')) {
+          body.quality = 'xhigh';
+        } else if (qualityLower.includes('high') || qualityLower.includes('hd') || qualityLower.includes('高质量')) {
+          body.quality = 'high';
+        } else if (qualityLower.includes('medium') || qualityLower.includes('中等') || qualityLower.includes('平衡')) {
+          body.quality = 'medium';
+        } else if (qualityLower.includes('low') || qualityLower.includes('低') || qualityLower.includes('快速')) {
+          body.quality = 'low';
+        } else {
+          body.quality = 'auto';
+        }
+        
+        // 背景参数处理：auto / opaque / transparent
+        if (task.background) {
+          const bgLower = task.background.toLowerCase();
+          if (bgLower.includes('transparent') || bgLower.includes('透明')) {
+            body.background = 'transparent';
+          } else if (bgLower.includes('opaque') || bgLower.includes('不透明')) {
+            body.background = 'opaque';
+          } else {
+            body.background = 'auto';
+          }
         }
       } else if (presetKey?.startsWith('grok')) {
         // Grok Imagine: 质量选项 1K/2K 映射到 resolution 参数
@@ -607,22 +673,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
         // quality 默认 medium
         body.quality = 'medium';
-      } else if (presetKey?.startsWith('wan')) {
-        // Wan 2.7: quality = standard / high
-        if (qualityLower.includes('high') || qualityLower.includes('高') || qualityLower.includes('超清')) {
-          body.quality = 'high';
-        } else {
-          body.quality = 'standard';
-        }
       }
+
 
       // 负向提示词
       if (task.negativePrompt?.trim()) {
         body.negative_prompt = task.negativePrompt;
       }
 
-      // response_format 设为 url（大多数 API 默认就是 url，显式指定增强兼容性）
-      body.response_format = 'url';
+      // response_format：gpt-image 系列不支持此参数且总是返回 base64，故跳过；
+      // 其他 API 设为 url（大多数 API 默认就是 url，显式指定增强兼容性）
+      if (presetKey !== 'gpt-image-2' && presetKey !== 'gpt-image-2.5-flare' && presetKey !== 'gpt-image-2.5-sunburst') {
+        body.response_format = 'url';
+      }
+
+
 
       // ===== 判断是否为图生图模式（有参考图时走图生图） =====
       const hasReference = task.referenceImages && task.referenceImages.length > 0;
@@ -845,10 +910,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         } else if (mode === 'chat') {
           endpoints.push(...buildChatEndpoints());
         } else {
-          // auto：只尝试 generations + edits 两类最常见的（去掉 variations 和 chat，减少探测）
-          // （generations 端点传图是 GPT-Image 等现代模型的图生图标准方式）
-          endpoints.push(...buildGenEndpoints());
-          endpoints.push(...buildEditEndpoints());
+          // auto：根据模型类型决定优先顺序（修复：此前只计算 presetKey 未向 endpoints 添加任何端点，
+          // 导致图生图端点数组为空、请求从未发出，报"所有图生图端点均不可用"）
+          const presetKeyForEndpoint = matchModelPresetKey(task.model);
+          const presetLower = (presetKeyForEndpoint || '').toLowerCase();
+          const isGptImage = presetLower.includes('gpt-image');
+          const isChatModel = presetLower.includes('grok') || presetLower.includes('gemini');
+          if (isGptImage) {
+            // OpenAI gpt-image 系：图生图标准端点为 /images/edits
+            endpoints.push(...buildEditEndpoints());
+          } else if (isChatModel) {
+            // 多模态 chat 模型：chat 优先，edits 兜底
+            endpoints.push(...buildChatEndpoints());
+            endpoints.push(...buildEditEndpoints());
+          } else {
+            // 其他模型：edits + chat + generations 兜底，由请求循环逐个尝试
+            endpoints.push(...buildEditEndpoints());
+            endpoints.push(...buildChatEndpoints());
+            endpoints.push(...buildGenEndpoints());
+          }
         }
         } else {
           // 文生图模式：仅尝试最常用的 2 个端点，其他少见端点不再探测
@@ -878,8 +958,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const effectiveEndpoints: string[] = [];
       if (hasEndpointCache && cachedEndpointUrl) {
-        effectiveEndpoints.push(cachedEndpointUrl);
-        logger.info(`${debugPrefix} 💾 使用缓存端点 [${isImageEditMode ? '图生图' : '文生图'}]:`, String(cachedEndpointUrl));
+        // 端点规范化：旧版本可能缓存了单数 /images/edit，自动转为复数 /images/edits
+        let normalizedEndpoint = cachedEndpointUrl;
+        if (normalizedEndpoint.endsWith('/images/edit') && !normalizedEndpoint.endsWith('/images/edits')) {
+          normalizedEndpoint = normalizedEndpoint.replace(/\/images\/edit$/, '/images/edits');
+          logger.info(`${debugPrefix} 🔧 缓存端点已规范化: ${cachedEndpointUrl} → ${normalizedEndpoint}`);
+        }
+        effectiveEndpoints.push(normalizedEndpoint);
+        logger.info(`${debugPrefix} 💾 使用缓存端点 [${isImageEditMode ? '图生图' : '文生图'}]:`, String(normalizedEndpoint));
       } else {
         effectiveEndpoints.push(...endpoints);
       }
@@ -1109,7 +1195,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           logger.info(`${debugPrefix}   请求体:`, JSON.stringify(variant.body, null, 2));
 
           try {
-            let requestBody: BodyInit;
+            let requestBody: BodyInit = JSON.stringify(variant.body);
             const requestHeaders: Record<string, string> = {
               'Authorization': `Bearer ${apiConfig.apiKey}`,
               'Accept': 'application/json',
@@ -1188,12 +1274,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   extraParams: {},
                 });
               } else if (isGenEndpoint) {
-                // ====== generations 端点：图生图首选（精简为3种核心方案）======
+                // ====== generations 端点：图生图首选（先无mode兼容，再有mode标准）======
 
-                // 第1优先级：JSON + base64 + image 字段（最可能是正确方式）
+                // 第1优先级：JSON + base64 + image 字段（无mode，第三方平台兼容性最好）
                 if (imageEditBase64List.length > 0) {
                   attempts.push({
-                    label: 'JSON base64 · field=image',
+                    label: 'JSON base64 · field=image（无mode）',
                     mode: 'generations-json',
                     format: 'json',
                     fieldName: 'image',
@@ -1201,16 +1287,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   });
                 }
 
-                // 第2优先级：FormData + image 字段
+                // 第2优先级：JSON + base64 + image 字段（含mode，GPT-Image官方标准）
+                if (imageEditBase64List.length > 0) {
+                  attempts.push({
+                    label: 'JSON base64 · field=image（含mode）',
+                    mode: 'generations-json',
+                    format: 'json',
+                    fieldName: 'image',
+                    extraParams: { mode: 'image-to-image', image_weight: strength },
+                  });
+                }
+
+                // 第3优先级：FormData + image 字段（无mode）
                 attempts.push({
-                  label: 'FormData · field=image',
+                  label: 'FormData · field=image（无mode）',
                   mode: 'generations-form',
                   format: 'formdata',
                   fieldName: 'image',
                   extraParams: {},
                 });
 
-                // 第3优先级：FormData + images 字段（部分API用复数）
+                // 第4优先级：FormData + image 字段（含mode）
+                attempts.push({
+                  label: 'FormData · field=image（含mode）',
+                  mode: 'generations-form',
+                  format: 'formdata',
+                  fieldName: 'image',
+                  extraParams: { mode: 'image-to-image', image_weight: strength },
+                });
+
+                // 第5优先级：FormData + images 字段（部分API用复数）
                 attempts.push({
                   label: 'FormData · field=images',
                   mode: 'generations-form',
@@ -1344,14 +1450,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       logger.info(`${debugPrefix}     [${idx + 1}] append ${attempt.fieldName}: ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
                     });
 
-                    // 方式B/C 兜底：如果是复数字段名（images/files），同时追加索引形式
-                    // 部分后端（如某些Python框架）需要 images[0]/images[1] 或 image_0/image_1
-                    if (attempt.fieldName === 'images' && imageEditFiles.length > 1) {
-                      imageEditFiles.forEach((file, idx) => {
-                        fd.append(`images[${idx}]`, file, file.name);
-                        fd.append(`image_${idx}`, file, file.name);
-                      });
-                    }
+                    // 多图时不追加 images[0]/image_0 等冗余字段，避免后端解析错误
+                    // 只靠同一字段名多次append，多数后端框架会自动解析为数组
 
                     // 打印 FormData 条目（调试用）
                     const fdEntries = Array.from(fd.entries());
@@ -1368,10 +1468,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       fd.append('mask', mask, mask.name);
                     }
 
-                    // 图生图关键参数：mode + image_weight（seedream/wan等模型需要）
-                    if (isGenEndpoint) {
-                      fd.append('mode', 'image-to-image');
-                      fd.append('image_weight', strength);
+                    // 图生图关键参数：mode + image_weight（只有attempt明确要求时才添加）
+                    if (isGenEndpoint && attempt.extraParams.mode) {
+                      fd.append('mode', attempt.extraParams.mode);
+                      fd.append('image_weight', attempt.extraParams.image_weight || strength);
                     } else if (isEditEndpoint) {
                       fd.append('strength', strength);
                     }
@@ -1430,20 +1530,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     if (imageEditBase64List.length === 1) {
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
                     } else {
-                      // 多图：优先用复数字段（images数组）
-                      // 同时尝试字段名+索引形式（image_0/image_1）作为兼容兜底
+                      // 多图：只用 images 数组字段，去掉冗余的 image_0/images[0] 等导致JSON解析错误
                       jsonBody.images = imageEditBase64List;
-                      imageEditBase64List.forEach((b64, idx) => {
-                        jsonBody[`image_${idx}`] = b64;
-                        jsonBody[`images[${idx}]`] = b64;
-                      });
-                      // 第一张也用原字段名保留
+                      // 同时保留第一张用原字段名（部分API只认单图字段）
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
                     }
-                    // 图生图关键参数：mode + image_weight（seedream/wan等模型需要，否则会被当文生图忽略参考图）
-                    if (isGenEndpoint) {
-                      jsonBody.mode = 'image-to-image';
-                      jsonBody.image_weight = strength;
+                    // 图生图关键参数：mode + image_weight（只有attempt明确要求时才添加，避免第三方平台不支持导致失败）
+                    if (isGenEndpoint && attempt.extraParams.mode) {
+                      jsonBody.mode = attempt.extraParams.mode;
+                      jsonBody.image_weight = attempt.extraParams.image_weight || strength;
                     } else if (isEditEndpoint) {
                       jsonBody.strength = strength;
                     }
@@ -1788,7 +1883,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (images.length > 0 && images.length < expectedCount) {
         const remaining = expectedCount - images.length;
         // 如果 successEndpoint 为空，使用第一个端点兜底
-        const fillEndpoint = successEndpoint || endpoints[0] || effectiveEndpoints[0] || '';
+        let fillEndpoint = successEndpoint || endpoints[0] || effectiveEndpoints[0] || '';
+        // 补齐端点也做规范化
+        if (fillEndpoint.endsWith('/images/edit') && !fillEndpoint.endsWith('/images/edits')) {
+          fillEndpoint = fillEndpoint.replace(/\/images\/edit$/, '/images/edits');
+        }
         logger.info(`${debugPrefix} 🔄 数量不足（已有 ${images.length}/${expectedCount}），强制补齐剩余 ${remaining} 张...`);
         logger.info(`${debugPrefix}    补齐端点: ${fillEndpoint}`);
         logger.info(`${debugPrefix}    图生图模式: ${isImageEditMode ? '是' : '否'}`);
@@ -1852,12 +1951,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 imageEditFiles.forEach((file) => {
                   fd.append(fieldName, file, file.name);
                 });
-                if (fieldName === 'images' && imageEditFiles.length > 1) {
-                  imageEditFiles.forEach((file, idx) => {
-                    fd.append(`images[${idx}]`, file, file.name);
-                    fd.append(`image_${idx}`, file, file.name);
-                  });
-                }
+                // 多图时不追加 images[0]/image_0 等冗余字段，避免后端解析错误
                 // edits 端点加 mask（全透明）
                 if (extraParams.__useMask === 'true') {
                   const mask = await getMaskFile();
@@ -1970,13 +2064,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   imageEditFiles.forEach((file, idx) => {
                     fd.append(singleFieldName, file, file.name);
                   });
-                  // 复数字段时追加索引形式兜底
-                  if (singleFieldName === 'images' && imageEditFiles.length > 1) {
-                    imageEditFiles.forEach((file, idx) => {
-                      fd.append(`images[${idx}]`, file, file.name);
-                      fd.append(`image_${idx}`, file, file.name);
-                    });
-                  }
+                  // 多图时不追加 images[0]/image_0 等冗余字段，避免后端解析错误
                   // variations 不需要 prompt
                   if (!endpoint.includes('/images/variations')) {
                     let promptText = String(variant.body.prompt || '');
@@ -2085,10 +2173,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // eslint-disable-next-line no-console
         logger.error(`${debugPrefix} ❌ 所有端点都失败了，最后错误:`, String(lastError));
 
-        // 如果用了缓存端点且失败，增加失败计数；累计2次失败则清除缓存，下次重新探测
+        // 如果用了缓存端点且失败，增加失败计数；404/端点不存在立即清除，其他错误累计2次清除
         if (hasEndpointCache && cachedEndpointUrl) {
           const failCount = cachedFailures + 1;
-          if (failCount >= 2) {
+          const isEndpointNotFound = lastError && (
+            lastError.includes('404') ||
+            lastError.includes('Invalid URL') ||
+            lastError.includes('not found') ||
+            lastError.includes('Cannot POST')
+          );
+          if (isEndpointNotFound || failCount >= 2) {
             const updates: Partial<IApiConfig> = {};
             const variantKey = isImageEditMode ? 'cachedImageBodyVariantIndex' : 'cachedTextBodyVariantIndex';
             (updates as any)[cacheEndpointKey] = undefined;
@@ -2240,9 +2334,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 按模型名称模糊匹配对应的预设参数 key（支持带 api-{type}_ 前缀的 ID）
   function matchModelPresetKey(modelIdOrName: string): string | null {
     const lower = modelIdOrName.toLowerCase().replace(/_/g, '-');
-    // 精确匹配（去掉 api-xxx- 前缀后）
-    const baseId = lower.replace(/^api-[^_-]+[_-]/, '');
-    if (MODEL_RESOLUTIONS[baseId]) return baseId;
+    // 精确匹配：先尝试去掉 api-{provider}- 前缀（三段格式）
+    // 如果 MODEL_RESOLUTIONS 中没有，再尝试去掉 api-{provider}-{id}- 前缀（四段格式）
+    let baseId = lower;
+    // 先尝试三段格式：api-{provider}-{model} → {model}
+    const match2 = lower.match(/^api-[^-]+-(.+)$/);
+    if (match2) {
+      baseId = match2[1];
+      // 如果三段格式的结果在 MODEL_RESOLUTIONS 中，直接返回
+      if (MODEL_RESOLUTIONS[baseId]) return baseId;
+      // 如果不在，再尝试四段格式：api-{provider}-{id}-{model} → {model}
+      const match3 = lower.match(/^api-[^-]+-[^-]+-(.+)$/);
+      if (match3) {
+        baseId = match3[1];
+        if (MODEL_RESOLUTIONS[baseId]) return baseId;
+      }
+    }
     if (MODEL_RESOLUTIONS[lower]) return lower;
     // 模糊匹配 —— 更具体的放前面
     if (lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5.0pro') || lower.includes('seedream-5-pro')) return 'seedream-5.0-pro';
@@ -2254,6 +2361,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (lower.includes('gemini-3.1-flash') || lower.includes('gemini-3-flash') || lower.includes('gemini3flash')) return 'nano-banana-2';
     if (lower.includes('nano-banana') || lower.includes('nanobanana') || lower.includes('爆炸香蕉')) return 'nano-banana-2';
     if (lower.includes('gemini')) return 'nano-banana-2';
+    // GPT-Image 2.5 系列（更精确的匹配放前面）
+    // GPT-Image 2.5 系列（更精确的匹配放前面）
+    if (lower.includes('gpt-image-2.5-flare') || lower.includes('gpt-image-2-5-flare') || lower.includes('2.5-flare')) return 'gpt-image-2.5-flare';
+    if (lower.includes('gpt-image-2.5-sunburst') || lower.includes('gpt-image-2-5-sunburst') || lower.includes('2.5-sunburst')) return 'gpt-image-2.5-sunburst';
+    if (lower.includes('gpt-image-2.5') || lower.includes('gpt-image-2-5')) return 'gpt-image-2.5-flare';
     if (lower.includes('gpt-image')) return 'gpt-image-2';
     if (lower.includes('jimeng') || lower.includes('ji-meng') || lower.includes('即梦')) return 'jimeng-5.0';
     if (lower.includes('flux-1.1-pro') || lower.includes('flux-1-1-pro') || lower.includes('flux1.1pro')) return 'flux-1.1-pro';
@@ -2277,12 +2389,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return MODEL_RESOLUTIONS['flux-1.1-pro'] || ['1:1正方形·1024×1024', '3:4竖版·768×1024', '4:3横版·1024×768'];
   }, []);
 
-  const getQualitiesForModel = useCallback((modelId: string) => {
+      const getQualitiesForModel = useCallback((modelId: string) => {
+    const s = (modelId || '').toLowerCase();
+
+    // gpt-image-2.5 系列（更精确的匹配放前面）
+    if (s.includes('gpt-image-2.5-flare') || s.includes('gpt-image-2.5-sunburst') || s.includes('gpt-image-2-5')) {
+      const key = matchModelPresetKey(modelId);
+      if (key && MODEL_QUALITIES[key]) return MODEL_QUALITIES[key];
+    }
+
+    // gpt-image-2 系列（不包含 2.5）
+    if ((s.includes('gpt-image-2') || s.includes('gpt_image_2')) && !s.includes('gpt-image-2.5') && !s.includes('gpt-image-2-5')) {
+      return MODEL_QUALITIES['gpt-image-2'] || [];
+    }
+
+    // 其他模型走原有逻辑
     const key = matchModelPresetKey(modelId);
-    if (key) return MODEL_QUALITIES[key] || MODEL_QUALITIES['flux-1.1-pro'] || [];
+    if (key && MODEL_QUALITIES[key]) return MODEL_QUALITIES[key];
     return MODEL_QUALITIES['flux-1.1-pro'] || ['Standard', 'High'];
   }, []);
-
+  const getBackgroundsForModel = useCallback((modelId: string) => {
+    const key = matchModelPresetKey(modelId);
+    return (key && MODEL_BACKGROUNDS[key]) || MODEL_BACKGROUNDS['gpt-image-2.5-flare'] || [];
+  }, []);
   // ---- API Config ----
   const updateApiConfig = useCallback((id: string, updates: Partial<IApiConfig>) => {
     setApiConfigsState(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
@@ -2733,7 +2862,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     presets,
     projectTasks, tasks, taskStats, addTask, removeTask, updateTask, applyParamsToAll,
     generateTask, batchGenerate, activeModels, allModels, setActiveModels, addCustomModel,
-    getResolutionsForModel, getQualitiesForModel,
+    getResolutionsForModel, getQualitiesForModel, getBackgroundsForModel,
     selectedTaskId,
     setSelectedTaskId,
     newTaskParams,
@@ -2754,7 +2883,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     projects, currentProjectId, currentProject, setCurrentProjectId,
     addProject, renameProject, deleteProject, duplicateProject, toggleShareProject,
     projectTasks, taskStats, addTask, removeTask, updateTask, applyParamsToAll, generateTask,
-    batchGenerate, activeModels, allModels, setActiveModels, addCustomModel, getResolutionsForModel, getQualitiesForModel,
+    batchGenerate, activeModels, allModels, setActiveModels, addCustomModel, getResolutionsForModel, getQualitiesForModel, getBackgroundsForModel,
      selectedTaskId, setSelectedTaskId, newTaskParams, setNewTaskParams, markResultDownloaded,
     apiConfigs, updateApiConfig, verifyApiConfig,
     presets, applyPreset, savePreset, duplicatePreset,

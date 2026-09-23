@@ -1,4 +1,4 @@
-﻿# FC AI Image Workbench / FC内部AI生图工作台
+# FC AI Image Workbench / FC内部AI生图工作台
 
 [![Version](https://img.shields.io/badge/version-v1.0.0-blue.svg)](https://github.com/wode1187-del/FC-AI)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -72,9 +72,9 @@ npm install
 npm run dev
 ```
 
-The application will be available at http://localhost:5175
+The application will be available at http://localhost:5177
 
-应用将在 http://localhost:5175 启动
+应用将在 http://localhost:5177 启动
 
 ### Build / 构建
 

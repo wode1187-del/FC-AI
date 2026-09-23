@@ -230,10 +230,10 @@ export default function ImageEditor({
 
     // 同步翻转裁剪框
     if (cropBox) {
-      setCropBox((prev) => ({
-        ...prev,
-        x: canvas.width - prev.x - prev.w,
-      }));
+      setCropBox((prev) => {
+        if (!prev) return prev;
+        return { ...prev, x: canvas.width - prev.x - prev.w };
+      });
     }
 
     saveToHistory();
@@ -274,10 +274,10 @@ export default function ImageEditor({
 
     // 同步翻转裁剪框
     if (cropBox) {
-      setCropBox((prev) => ({
-        ...prev,
-        y: canvas.height - prev.y - prev.h,
-      }));
+      setCropBox((prev) => {
+        if (!prev) return prev;
+        return { ...prev, y: canvas.height - prev.y - prev.h };
+      });
     }
 
     saveToHistory();

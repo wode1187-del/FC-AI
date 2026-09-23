@@ -65,6 +65,7 @@ export default function LeftSidebar() {
     activeModels,
     getResolutionsForModel,
     getQualitiesForModel,
+    getBackgroundsForModel,
     applyParamsToAll,
     addTask,
     batchGenerate,
@@ -83,6 +84,8 @@ export default function LeftSidebar() {
     const list = getQualitiesForModel(activeModels[0]?.id || '');
     return list.find(q => q.startsWith('High')) || list[0] || 'High（模型原生高质量 · PNG 无损）';
   });
+  const [selectedBackground, setSelectedBackground] = useState('Auto（自动）');
+  const isGpt25Model = selectedModel.includes('gpt-image-2.5') || selectedModel.includes('gpt_image_2.5');
   const [imageCount, setImageCount] = useState(4);
   const [customCount, setCustomCount] = useState('');
   const [showCustomCount, setShowCustomCount] = useState(false);
@@ -111,11 +114,12 @@ export default function LeftSidebar() {
       modelLabel,
       ratio: selectedRatio,
       quality: selectedQuality,
+      background: selectedBackground,
       imageCount: showCustomCount ? parseInt(customCount) || 1 : imageCount,
       prompt: totalPrompt,
       negativePrompt: showNegativePrompt ? negativePrompt : undefined,
     });
-  }, [selectedModel, selectedRatio, selectedQuality, imageCount, showCustomCount, customCount, totalPrompt, negativePrompt, showNegativePrompt, activeModels, setNewTaskParams]);
+  }, [selectedModel, selectedRatio, selectedQuality, selectedBackground, imageCount, showCustomCount, customCount, totalPrompt, negativePrompt, showNegativePrompt, activeModels, setNewTaskParams]);
 
   const handleModelChange = (modelId: string) => {
     setSelectedModel(modelId);
@@ -132,6 +136,7 @@ export default function LeftSidebar() {
       modelLabel,
       ratio: selectedRatio,
       quality: selectedQuality,
+      background: selectedBackground,
       imageCount: showCustomCount ? parseInt(customCount) || 1 : imageCount,
     });
     toast.success('参数已应用到全部任务');
@@ -173,6 +178,7 @@ export default function LeftSidebar() {
       model: selectedModel,
       ratio: selectedRatio,
       quality: selectedQuality,
+      background: selectedBackground,
       imageCount: showCustomCount ? parseInt(customCount) || 1 : imageCount,
       prompt: totalPrompt,
       negativePrompt,
@@ -230,6 +236,7 @@ export default function LeftSidebar() {
       modelLabel,
       ratio: selectedRatio,
       quality: selectedQuality,
+      background: selectedBackground,
       imageCount: showCustomCount ? parseInt(customCount) || 1 : imageCount,
       prompt: totalPrompt,
       negativePrompt: showNegativePrompt ? negativePrompt : undefined,
@@ -489,19 +496,50 @@ export default function LeftSidebar() {
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-xs text-muted-foreground">图片质量</label>
-              <Select value={selectedQuality} onValueChange={setSelectedQuality}>
-                <SelectTrigger className="h-9 text-sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {getQualitiesForModel(selectedModel).map((q) => (
-                    <SelectItem key={q} value={q} className="text-sm">{q}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {isGpt25Model ? (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">图片质量</label>
+                  <Select value={selectedQuality} onValueChange={setSelectedQuality}>
+                    <SelectTrigger className="h-9 text-sm">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {getQualitiesForModel(selectedModel).map((q) => (
+                        <SelectItem key={q} value={q} className="text-sm">{q}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">背景</label>
+                  <Select value={selectedBackground} onValueChange={setSelectedBackground}>
+                    <SelectTrigger className="h-9 text-sm">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {getBackgroundsForModel(selectedModel).map((bg) => (
+                        <SelectItem key={bg} value={bg} className="text-sm">{bg}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="text-xs text-muted-foreground">图片质量</label>
+                <Select value={selectedQuality} onValueChange={setSelectedQuality}>
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {getQualitiesForModel(selectedModel).map((q) => (
+                      <SelectItem key={q} value={q} className="text-sm">{q}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
 
           {/* Image Count */}
@@ -535,11 +573,15 @@ export default function LeftSidebar() {
             </div>
             {showCustomCount && (
               <Input
-                type="number"
-                min={1}
-                max={20}
+                type="text"
+                inputMode="numeric"
                 value={customCount}
-                onChange={(e) => setCustomCount(e.target.value)}
+                onChange={(e) => {
+                  // 只允许输入数字
+                  const val = e.target.value.replace(/[^0-9]/g, '');
+                  // 直接更新，不做限制
+                  setCustomCount(val);
+                }}
                 placeholder="自定义张数（1-20）"
                 className="h-8 text-sm"
               />
@@ -562,7 +604,8 @@ export default function LeftSidebar() {
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground">起始行</label>
                 <Input
-                  type="number"
+  type="text"
+  inputMode="numeric"
                   value={startRow}
                   onChange={(e) => setStartRow(parseInt(e.target.value) || 1)}
                   className="h-8 text-sm text-center"
@@ -571,7 +614,8 @@ export default function LeftSidebar() {
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground">结束行</label>
                 <Input
-                  type="number"
+  type="text"
+  inputMode="numeric"
                   value={endRow}
                   onChange={(e) => setEndRow(parseInt(e.target.value) || 1)}
                   className="h-8 text-sm text-center"

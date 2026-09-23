@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { ErrorBoundary } from "react-error-boundary";
 import { AppContainer, ErrorRender } from "@lark-apaas/client-toolkit-lite";
-import App from "./app";
+import App from "./App";
 import "./index.css";
 
 createRoot(document.getElementById("root")!).render(

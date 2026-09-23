@@ -1,37 +1,43 @@
 @echo off
 chcp 65001 >nul
-title FC内部AI生图工作台 - 本地版
+title FC??AI????? - ???
 
 echo ========================================
-echo    FC内部AI生图工作台 - 本地版
+echo    FC??AI????? - ???
 echo ========================================
 echo.
 
 cd /d "%~dp0"
 
+rem ?????BOM?
+if exist "fix-bom.py" (
+    python "fix-bom.py" 2>nul
+)
+
 where node >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [错误] 未检测到 Node.js，请先安装 Node.js 18+
-    echo 下载地址: https://nodejs.org/
+    echo [??] ???? Node.js????? Node.js 18+
+    echo ????: https://nodejs.org/
     pause
     exit /b 1
 )
 
 if not exist "node_modules" (
-    echo [信息] 首次运行，正在安装依赖...
+    echo [??] ???????????...
     call npm install
     if %errorlevel% neq 0 (
-        echo [错误] 依赖安装失败
+        echo [??] ??????
         pause
         exit /b 1
     )
 )
 
-echo [信息] 启动开发服务器 (端口: 5175)...
-echo [信息] 启动后自动打开浏览器
+echo [??] ??????? (??: 5177)...
+echo [??] ??????????
 echo.
 
-start "" "http://localhost:5175"
-call npm run dev -- --port 5175 --host
+start "" "http://localhost:5177"
+call npm run dev -- --port 5177 --host
 
 pause
+

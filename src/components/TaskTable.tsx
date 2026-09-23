@@ -303,6 +303,7 @@ export default function TaskTable() {
     activeModels,
     getResolutionsForModel,
     getQualitiesForModel,
+    getBackgroundsForModel,
     updateTask,
 
     addTask,
@@ -1188,22 +1189,59 @@ export default function TaskTable() {
                            </SelectContent>
                         </Select>
                       </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] text-muted-foreground">图片质量</label>
-                        <Select
-                          value={task.quality}
-                          onValueChange={(v) => updateTask(task.id, { quality: v })}
-                        >
-                          <SelectTrigger className="h-7 text-xs">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {getQualitiesForModel(task.model).map((q) => (
-                              <SelectItem key={q} value={q} className="text-xs">{q}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
+                      {(task.model.includes('gpt-image-2.5') || task.model.includes('gpt_image_2.5')) ? (
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <div className="space-y-1">
+                            <label className="text-[10px] text-muted-foreground">图片质量</label>
+                            <Select
+                              value={task.quality}
+                              onValueChange={(v) => updateTask(task.id, { quality: v })}
+                            >
+                              <SelectTrigger className="h-7 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {getQualitiesForModel(task.model).map((q) => (
+                                  <SelectItem key={q} value={q} className="text-xs">{q}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[10px] text-muted-foreground">背景</label>
+                            <Select
+                              value={task.background || 'Auto（自动）'}
+                              onValueChange={(v) => updateTask(task.id, { background: v })}
+                            >
+                              <SelectTrigger className="h-7 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {getBackgroundsForModel(task.model).map((bg) => (
+                                  <SelectItem key={bg} value={bg} className="text-xs">{bg}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-muted-foreground">图片质量</label>
+                          <Select
+                            value={task.quality}
+                            onValueChange={(v) => updateTask(task.id, { quality: v })}
+                          >
+                            <SelectTrigger className="h-7 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {getQualitiesForModel(task.model).map((q) => (
+                                <SelectItem key={q} value={q} className="text-xs">{q}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
                       <div className="space-y-1">
                         <label className="text-[10px] text-muted-foreground">张数</label>
                         <div className="flex gap-1 flex-wrap">
@@ -1232,21 +1270,18 @@ export default function TaskTable() {
                         </div>
                         <input
                           id={`custom-count-${task.id}`}
-                          type="number"
-                          min={1}
-                          max={20}
-                          value={task.imageCount === 1 || task.imageCount === 2 || task.imageCount === 4 || task.imageCount === 6 ? '' : task.imageCount}
+                          type="text"
+                          inputMode="numeric"
+                          value={String(task.imageCount || '')}
                           onChange={(e) => {
-                            const v = parseInt(e.target.value);
-                            if (!isNaN(v) && v >= 1 && v <= 20) {
-                              updateTask(task.id, { imageCount: v });
-                            } else if (e.target.value === '') {
-                              // 空值时暂不处理，失焦后恢复
-                            }
+                            // 只允许输入数字
+                            const val = e.target.value.replace(/[^0-9]/g, '');
+                            // 直接更新，不做限制
+                            updateTask(task.id, { imageCount: val === '' ? 0 : parseInt(val) });
                           }}
                           onBlur={(e) => {
                             const v = parseInt(e.target.value);
-                            if (isNaN(v) || v < 1 || v > 20) {
+                            if (isNaN(v) || v < 1) {
                               updateTask(task.id, { imageCount: 1 });
                             }
                           }}
