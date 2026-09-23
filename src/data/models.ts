@@ -28,6 +28,10 @@ export interface IGenerateResult {
   createdAt: number;
   width: number;
   height: number;
+  /** 结果类型：图片（默认）或视频（视频生成功能产出 mp4） */
+  type?: 'image' | 'video';
+  /** 视频时长（秒），视频结果特有 */
+  duration?: number;
   downloadedJpg?: boolean;  // 是否已下载 JPG
   downloadedPng?: boolean;  // 是否已下载 PNG
 }
@@ -49,6 +53,10 @@ export interface ITask {
   imageCount: number;
   results: IGenerateResult[];
   background?: string;
+  /** 视频生成时长（秒），视频功能任务特有 */
+  duration?: number;
+  /** 视频动作参考（URL），动作跟随/全能替换功能特有 */
+  videoRefUrl?: string;
   errorMsg?: string;
   createdAt: number;
   startedAt?: number;
@@ -59,7 +67,7 @@ export interface ITask {
 // API 配置
 export interface IApiConfig {
   id: string;
-  type: 'openai' | 'google' | 'volcengine' | 'custom';
+  type: 'openai' | 'google' | 'volcengine' | 'custom' | 'kling' | 'seedance';
   label: string;
   baseUrl: string;
   apiKey: string;
@@ -842,6 +850,22 @@ export const MOCK_API_CONFIGS: IApiConfig[] = [
     apiKey: '',
     status: 'unverified',
     isSecondary: true,
+  },
+  {
+    id: 'api-kling',
+    type: 'kling',
+    label: '可灵视频',
+    baseUrl: 'https://api-beijing.klingai.com',
+    apiKey: '',
+    status: 'unverified',
+  },
+  {
+    id: 'api-seedance',
+    type: 'seedance',
+    label: '即梦视频',
+    baseUrl: 'https://ark.cn-beijing.volces.com',
+    apiKey: '',
+    status: 'unverified',
   },
 ];
 

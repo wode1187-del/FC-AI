@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import { useApp } from '@/context/AppContext';
+import FeaturePicker from '@/components/FeaturePicker';
 import { getResolutionGroups } from '@/data/models';
 import { useNavigate } from 'react-router-dom';
 
@@ -276,6 +277,9 @@ export default function LeftSidebar() {
         </TabsList>
 
         <TabsContent value="params" className="flex-1 overflow-y-auto px-3 py-3 space-y-4 data-[state=active]:flex data-[state=active]:flex-col data-[state=active]:flex-1">
+          {/* 功能模板（服装商拍 / 服装设计 / 视频生成） */}
+          <FeaturePicker />
+
           {/* Current Project */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">

@@ -48,6 +48,7 @@ import { logger, scopedStorage } from '@lark-apaas/client-toolkit-lite';
 import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
 import { useApp } from '@/context/AppContext';
+import { isVideoModel } from '@/data/featureTemplates';
 import { getResolutionGroups, type ITask } from '@/data/models';
 import type { ITextOptimizeConfig } from '@/data/models';
 import { useNavigate } from 'react-router-dom';
@@ -309,6 +310,7 @@ export default function TaskTable() {
     addTask,
     removeTask,
     generateTask,
+    generateVideoTask,
     markResultDownloaded,
     textOptimizeConfig,
     updateTextOptimizeConfig,
@@ -777,7 +779,11 @@ export default function TaskTable() {
 
     toast.info(`任务 #${task.index} 开始生成...`);
     try {
-      await generateTask(taskId);
+      if (isVideoModel(task.model)) {
+        await generateVideoTask(taskId);
+      } else {
+        await generateTask(taskId);
+      }
       // generateTask 内部会更新状态，这里再检查一下结果
       const updated = tasks.find(t => t.id === taskId);
       if (updated?.status === 'completed') {
@@ -801,7 +807,11 @@ export default function TaskTable() {
 
     toast.info(`任务 #${task.index} 追加生成中...`);
     try {
-      await generateTask(taskId, true);
+      if (isVideoModel(task.model)) {
+        await generateVideoTask(taskId);
+      } else {
+        await generateTask(taskId, true);
+      }
       const updated = tasks.find(t => t.id === taskId);
       if (updated?.status === 'completed') {
         toast.success(`任务 #${task.index} 追加生成成功`);
@@ -1336,6 +1346,21 @@ export default function TaskTable() {
                         const hasDownloadedPng = !!img.downloadedPng;
                         const anyDownloaded = hasDownloadedJpg || hasDownloadedPng;
                         const allDownloaded = hasDownloadedJpg && hasDownloadedPng;
+
+                        // 视频结果（视频生成功能产出）
+                        if (img.type === 'video') {
+                          return (
+                            <div key={img.id} className="flex flex-col rounded-md border-2 border-border bg-card overflow-hidden">
+                              <div className="relative aspect-[3/4] bg-black">
+                                <video src={img.url} controls preload="metadata" className="w-full h-full object-contain" />
+                              </div>
+                              <div className="px-1.5 py-1 text-[10px] text-muted-foreground flex justify-between items-center">
+                                <span className="font-medium text-foreground/80">视频 {imgIdx + 1}</span>
+                                {img.duration ? <span>{img.duration}s</span> : null}
+                              </div>
+                            </div>
+                          );
+                        }
 
                         return (
                           <div

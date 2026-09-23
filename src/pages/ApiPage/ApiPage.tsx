@@ -26,6 +26,8 @@ const API_TABS = [
   { id: 'google', label: 'Google / Nano Banana', sub: '爆炸香蕉' },
   { id: 'volcengine', label: '火山引擎 / 即梦', sub: '即梦 5.0' },
   { id: 'custom', label: '自定义兼容接口', sub: 'OpenAI Compatible' },
+  { id: 'kling', label: '可灵视频', sub: 'KLING 图生视频' },
+  { id: 'seedance', label: '即梦视频', sub: 'Seedance 视频' },
   { id: 'prompt', label: '提示词优化 API', sub: '独立文本模型' },
 ];
 
@@ -214,7 +216,7 @@ export default function ApiPage() {
           </CardHeader>
           <CardContent>
               <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-              <TabsList className="grid grid-cols-5 mb-6 w-full">
+              <TabsList className="grid grid-cols-7 mb-6 w-full">
                 {API_TABS.map((tab) => (
                   <TabsTrigger key={tab.id} value={tab.id} className="flex flex-col gap-0.5 py-2">
                     <span className="text-xs font-medium">{tab.label}</span>

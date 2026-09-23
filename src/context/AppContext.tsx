@@ -1,7 +1,9 @@
 import { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { scopedStorage, logger } from '@lark-apaas/client-toolkit-lite';
 import { toast } from 'sonner';
-import type { IProject, ITask, IApiConfig, IModel, IPreset, ITextOptimizeConfig } from '@/data/models';
+import type { IProject, ITask, IApiConfig, IModel, IPreset, ITextOptimizeConfig, IGenerateResult } from '@/data/models';
+import { getFeatureTemplate, isVideoModel, VIDEO_MODELS } from '@/data/featureTemplates';
+import type { IFeatureTemplate } from '@/data/featureTemplates';
 import {
   MOCK_PROJECTS,
   MOCK_TASKS,
@@ -162,6 +164,11 @@ interface AppContextType {
   addTextOptimizeModel: (modelName: string) => void;
   removeTextOptimizeModel: (modelName: string) => void;
   loadTextOptimizeModels: () => Promise<boolean>;
+
+  // 视频生成（可灵 / 即梦 Seedance）
+  generateVideoTask: (taskId: string) => Promise<void>;
+  // 一键应用功能模板（预置提示词 + 推荐模型 + 参数）
+  applyFeature: (featureId: string) => IFeatureTemplate | null;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -464,6 +471,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return t;
     }));
   }, [currentProjectId]);
+
+  // 一键应用功能模板：载入预置提示词 + 自动推荐模型 + 默认参数（免填关键词）
+  const applyFeature = useCallback((featureId: string): IFeatureTemplate | null => {
+    const tpl = getFeatureTemplate(featureId);
+    if (!tpl) return null;
+    const isVideo = isVideoModel(tpl.recommendedModel);
+    // 视频模型自动激活（加入 activeModels，使模型下拉可显示/切换）
+    if (isVideo) {
+      setActiveModelsState(prev =>
+        prev.some(m => m.id === tpl.recommendedModel)
+          ? prev
+          : [...prev, ...VIDEO_MODELS.filter(vm => !prev.some(p => p.id === vm.id))],
+      );
+    }
+    const modelLabel = isVideo
+      ? (VIDEO_MODELS.find(m => m.id === tpl.recommendedModel)?.name || tpl.recommendedModel)
+      : (MOCK_MODELS.find(m => m.id === tpl.recommendedModel)?.name || tpl.recommendedModel);
+    const update: Partial<ITask> = {
+      model: tpl.recommendedModel,
+      modelLabel,
+      prompt: tpl.prompt,
+      negativePrompt: tpl.negativePrompt || undefined,
+      imageCount: tpl.params.imageCount || 1,
+      background: tpl.params.background,
+    };
+    if (tpl.params.ratio) update.ratio = tpl.params.ratio;
+    if (tpl.params.quality) update.quality = tpl.params.quality;
+    if (tpl.params.duration) update.duration = tpl.params.duration;
+    applyParamsToAll(update);
+    setNewTaskParamsState(prev => ({ ...prev, ...update }));
+    return tpl;
+  }, [applyParamsToAll, setNewTaskParamsState]);
 
   // 根据模型 ID 查找对应的 API 配置
   const findApiConfigForModel = useCallback((modelId: string): IApiConfig | null => {
@@ -2384,12 +2423,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }
 
   const getResolutionsForModel = useCallback((modelId: string) => {
+    // 视频模型：返回视频比例（16:9 / 9:16 / 1:1）
+    if (modelId.startsWith('kling') || modelId.includes('seedance')) {
+      return VIDEO_MODELS.find(m => m.id === modelId)?.resolutions || ['16:9 横屏', '9:16 竖屏', '1:1 方形'];
+    }
     const key = matchModelPresetKey(modelId);
     if (key) return MODEL_RESOLUTIONS[key] || MODEL_RESOLUTIONS['flux-1.1-pro'] || [];
     return MODEL_RESOLUTIONS['flux-1.1-pro'] || ['1:1正方形·1024×1024', '3:4竖版·768×1024', '4:3横版·1024×768'];
   }, []);
 
       const getQualitiesForModel = useCallback((modelId: string) => {
+    // 视频模型：视频清晰度档位
+    if (modelId.startsWith('kling') || modelId.includes('seedance')) {
+      return VIDEO_MODELS.find(m => m.id === modelId)?.qualities || ['1080P 高清', '720P 标准'];
+    }
     const s = (modelId || '').toLowerCase();
 
     // gpt-image-2.5 系列（更精确的匹配放前面）
@@ -2635,6 +2682,148 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return { models, total: pagination.total, warnings };
   }, []);
 
+
+  // ==================== 视频生成（可灵 / 即梦 Seedance） ====================
+  /** 将 blob/网络图转 data URI（可灵取裸 base64，Seedance 支持 data URI） */
+  const imageToBase64 = useCallback(async (url: string): Promise<string> => {
+    if (url.startsWith('data:')) return url;
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('图片读取失败'));
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return url; // 已是公网 URL，直接透传
+    }
+  }, []);
+
+  const generateVideoTask = useCallback(async (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || !task.prompt.trim()) return;
+
+    const isKling = task.model.startsWith('kling');
+    const apiType = isKling ? 'kling' : 'seedance';
+    const apiConfig = apiConfigs.find(c => c.type === apiType && c.baseUrl && c.apiKey && c.status === 'verified');
+    if (!apiConfig) {
+      updateTask(taskId, { status: 'failed', errorMsg: '未找到可用的视频 API 配置，请先在「API接口」页面配置并验证可灵/即梦视频' });
+      return;
+    }
+
+    setTasks(prev => prev.map(t => t.id === taskId ? {
+      ...t, status: 'generating', errorMsg: undefined, startedAt: Date.now(), completedAt: undefined, durationMs: undefined,
+    } : t));
+
+    const startTime = Date.now();
+    const durationSec = Math.min(Math.max(task.duration || 5, 3), 15);
+    const qualityMode = task.quality?.includes('1080') || task.quality?.includes('高清') ? 'pro' : 'std';
+    const ratioKey = task.ratio?.split(' ')[0] || '16:9';
+
+    try {
+      let videoUrl = '';
+      if (isKling) {
+        const hasImage = task.referenceImages.length > 0;
+        const endpoint = hasImage
+          ? `${apiConfig.baseUrl}/v1/videos/image2video`
+          : `${apiConfig.baseUrl}/v1/videos/text2video`;
+        const body: Record<string, unknown> = {
+          model_name: task.model === 'kling-v2-6' ? 'kling-v2-6' : 'kling-v3',
+          prompt: task.prompt,
+          negative_prompt: task.negativePrompt || '',
+          duration: String(durationSec),
+          mode: qualityMode,
+          sound: 'off',
+        };
+        if (hasImage) {
+          const img = await imageToBase64(task.referenceImages[0].url);
+          body.image = img.startsWith('data:') ? (img.split(',')[1] || img) : img;
+        } else {
+          body.ratio = ratioKey;
+        }
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.code !== 0 || !data.data?.task_id) {
+          throw new Error(data.message || `可灵请求失败 HTTP ${res.status}`);
+        }
+        const remoteId = data.data.task_id;
+        for (let i = 0; i < 120; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          const q = await fetch(`${apiConfig.baseUrl}/v1/videos/${remoteId}`, {
+            headers: { 'Authorization': `Bearer ${apiConfig.apiKey}` },
+          });
+          const qd = await q.json().catch(() => ({}));
+          const st = qd.data?.task_status;
+          if (st === 'succeed') {
+            videoUrl = qd.data?.task_result?.videos?.[0]?.url || '';
+            break;
+          }
+          if (st === 'failed') throw new Error('可灵生成失败：' + (qd.data?.task_status_msg || '未知错误'));
+        }
+        if (!videoUrl) throw new Error('视频生成超时，请稍后重试');
+      } else {
+        // 即梦 Seedance（火山方舟）
+        const content: Record<string, unknown>[] = [];
+        if (task.referenceImages.length > 0) {
+          content.push({ type: 'image', data: await imageToBase64(task.referenceImages[0].url) });
+        }
+        content.push({ type: 'text', text: task.prompt });
+        const res = await fetch(`${apiConfig.baseUrl}/api/plan/v3/contents/generations/tasks`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'doubao-seedance-2-5-260628',
+            content,
+            ratio: ratioKey,
+            duration: Math.min(Math.max(durationSec, 4), 15),
+            watermark: false,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        const remoteId = data.id || data.task_id;
+        if (!res.ok || !remoteId) throw new Error(data.error?.message || data.message || `即梦请求失败 HTTP ${res.status}`);
+        for (let i = 0; i < 120; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          const q = await fetch(`${apiConfig.baseUrl}/api/plan/v3/contents/generations/tasks/${remoteId}`, {
+            headers: { 'Authorization': `Bearer ${apiConfig.apiKey}` },
+          });
+          const qd = await q.json().catch(() => ({}));
+          if (qd.status === 'succeeded') {
+            videoUrl = qd.content?.video_url || '';
+            break;
+          }
+          if (qd.status === 'failed') throw new Error('即梦生成失败：' + (qd.error?.message || '未知错误'));
+        }
+        if (!videoUrl) throw new Error('视频生成超时，请稍后重试');
+      }
+
+      const newResult: IGenerateResult = {
+        id: `res_${Date.now()}`,
+        url: videoUrl,
+        model: task.model,
+        prompt: task.prompt,
+        createdAt: Date.now(),
+        width: 0,
+        height: 0,
+        type: 'video',
+        duration: durationSec,
+      };
+      setTasks(prev => prev.map(t => t.id === taskId ? {
+        ...t, status: 'completed', completedAt: Date.now(), durationMs: Date.now() - startTime,
+        results: [...t.results, newResult].slice(0, 20),
+      } : t));
+    } catch (e) {
+      const msg = String(e instanceof Error ? e.message : e);
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'failed', errorMsg: msg, completedAt: Date.now(), durationMs: Date.now() - startTime } : t));
+    }
+  }, [tasks, apiConfigs, updateTask, setTasks]);
+
   const verifyApiConfig = useCallback(async (id: string): Promise<boolean> => {
     const config = apiConfigs.find(c => c.id === id);
     if (!config || !config.baseUrl || !config.apiKey) {
@@ -2645,6 +2834,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const isSecondary = config.isSecondary || id === 'api-custom-2';
     const suffix = isSecondary ? ' · API 2' : '';
     const sourceLabel = isSecondary ? '自定义兼容接口 · API 2' : config.label;
+
+    // 视频 API（可灵 / 即梦）：轻量连通性验证
+    if (config.type === 'kling' || config.type === 'seedance') {
+      try {
+        const testUrl = config.type === 'kling'
+          ? `${config.baseUrl}/v1/videos`
+          : `${config.baseUrl}/api/plan/v3/contents/generations/tasks?page_num=1&page_size=1`;
+        const res = await fetch(testUrl, {
+          headers: { 'Authorization': `Bearer ${config.apiKey}` },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.status === 401 || res.status === 403) {
+          updateApiConfig(id, { status: 'error', errorMsg: '鉴权失败：API 密钥无效或已过期' });
+          return false;
+        }
+        updateApiConfig(id, { status: 'verified', verifiedAt: Date.now(), errorMsg: undefined });
+        return true;
+      } catch {
+        updateApiConfig(id, { status: 'error', errorMsg: '无法连接视频 API，请检查接口地址与网络' });
+        return false;
+      }
+    }
 
     try {
       // 尝试真实请求 API 拉取模型
@@ -2879,6 +3090,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     addTextOptimizeModel,
     removeTextOptimizeModel,
     loadTextOptimizeModels,
+    generateVideoTask,
+    applyFeature,
   }), [
     projects, currentProjectId, currentProject, setCurrentProjectId,
     addProject, renameProject, deleteProject, duplicateProject, toggleShareProject,
