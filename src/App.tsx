@@ -8,7 +8,7 @@ export default function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<Navigate to="/generator" replace />} />
+        <Route index element={<GeneratorPage />} />
         <Route path="generator" element={<GeneratorPage />} />
         <Route path="api" element={<ApiPage />} />
         <Route path="*" element={<NotFoundPage />} />
