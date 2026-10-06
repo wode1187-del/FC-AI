@@ -274,7 +274,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const projectTasks = useMemo(
-    () => tasks.filter(t => t.projectId === currentProjectId),
+    () => tasks.filter(t => t.projectId === currentProjectId && !t.featureStudio),
     [tasks, currentProjectId]
   );
 
@@ -418,6 +418,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       ratio: merged.ratio ?? (defaultModel?.resolutions.find((r: string) => r === '1K · 1:1 正方形 · 1024×1024') || defaultModel?.resolutions[0] || '1K · 1:1 正方形 · 1024×1024'),
       quality: merged.quality ?? (defaultModel?.qualities.find((q: string) => q.startsWith('High')) || defaultModel?.qualities[0] || 'High（模型原生高质量 · PNG 无损）'),
       imageCount: merged.imageCount ?? 1,
+      background: merged.background,
+      featureId: merged.featureId,
+      featureStudio: merged.featureStudio,
       results: [],
       createdAt: Date.now(),
     };
@@ -495,14 +498,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       negativePrompt: tpl.negativePrompt || undefined,
       imageCount: tpl.params.imageCount || 1,
       background: tpl.params.background,
+      featureId: tpl.id,
     };
     if (tpl.params.ratio) update.ratio = tpl.params.ratio;
     if (tpl.params.quality) update.quality = tpl.params.quality;
     if (tpl.params.duration) update.duration = tpl.params.duration;
-    applyParamsToAll(update);
-    setNewTaskParamsState(prev => ({ ...prev, ...update }));
+    // 双参考图功能（如款式上身：上传款式+上传模特）→ 创建独立任务行，且不污染新任务默认参数，
+    // 保证之后的『批量增行』仍是普通任务，与款式上身区分开
+    if (tpl.referenceSlots && tpl.referenceSlots.length > 0) {
+      addTask(update);
+    } else {
+      applyParamsToAll(update);
+      setNewTaskParamsState(prev => ({ ...prev, ...update }));
+    }
     return tpl;
-  }, [applyParamsToAll, setNewTaskParamsState]);
+  }, [applyParamsToAll, addTask, setNewTaskParamsState]);
 
   // 根据模型 ID 查找对应的 API 配置
   const findApiConfigForModel = useCallback((modelId: string): IApiConfig | null => {
@@ -557,8 +567,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     const generateStartTime = Date.now();
 
-    // 超时保护：固定4分钟
-    const GENERATE_TIMEOUT_MS = 180000; // 3分钟
+    // 超时保护：图生图/4K大图可能需要较长时间，放宽到5分钟
+    const GENERATE_TIMEOUT_MS = 300000; // 5分钟
         const fetchWithTimeout = (url: string, init: RequestInit = {}): Promise<Response> => {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), GENERATE_TIMEOUT_MS);
@@ -733,6 +743,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       let imageEditFiles: File[] = [];
       let imageEditBase64List: string[] = [];
       let isImageEditMode = false;
+      // 双槽款式上身状态（model=模特底图 / style=衣服款式）。函数作用域声明，供后续端点/请求体分支读取。
+      let isDualSlotTryon = false;
+      let dualPresetKey = '';
+      let dualIsOpenAIImage = false;
+      let dualIsGoogle = false;
+      let dualIsVolc = false;
+      let dualIsGrok = false;
+      let dualIsWan = false;
+      // 按模型家族生成 slot 感知指令前缀（函数作用域，供 chat/formdata/json 三处分支调用）
+      let buildDualSlotInstruction: () => string = () => '';
 
       // 压缩图片：最长边限制为 maxSize，质量 quality，输出 JPEG
       const compressImage = async (file: File, maxSize = 2048, quality = 0.85): Promise<File> => {
@@ -841,11 +861,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         logger.info(`${debugPrefix} 参考图数量:`, String(refs.length));
 
         try {
+          // 按 slot 排序：衣服款式(style)在前=参考图1，模特底图(model)在后=参考图2。
+          // 该顺序与界面槽位（上传款式→上传模特）及用户手输提示词的"图1衣服、图2模特"一致，
+          // 也与系统追加的结构化角色前缀编号对齐，避免编号错位导致换衣混乱。
+          const slotOrder = (slot?: string) => (slot === 'style' ? 0 : slot === 'model' ? 1 : 2);
+          const sortedRefs = [...refs].sort((a, b) => slotOrder(a.slot) - slotOrder(b.slot));
           // 并行处理所有参考图
           const processed = await Promise.all(
-            refs.map(async (ref, idx) => {
+            sortedRefs.map(async (ref, idx) => {
               // eslint-disable-next-line no-console
-              logger.info(`${debugPrefix} 参考图[${idx + 1}]: ${ref.name} (${(ref.size / 1024).toFixed(1)}KB)`);
+              logger.info(`${debugPrefix} 参考图[${idx + 1}]: ${ref.name} (${(ref.size / 1024).toFixed(1)}KB, slot=${ref.slot || '无'})`);
               const rawFile = await imageUrlToBlob(ref.url, ref.name);
               const compressed = await compressImage(rawFile, 2048, 0.85);
               const b64 = await fileToBase64(compressed);
@@ -855,6 +880,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           imageEditFiles = processed.map((p) => p.file);
           imageEditBase64List = processed.map((p) => p.b64);
           isImageEditMode = true;
+
+          // ===== 双槽（款式上身）检测：同时有 style 槽(衣服款式=图1) 与 model 槽(模特底图=图2) =====
+          // sortedRefs 已按 slotOrder 排序：style=0(图1衣服) 在前，model=1(图2模特) 在后
+          const slotList = sortedRefs.map((r) => r.slot || '');
+          isDualSlotTryon = isImageEditMode &&
+            slotList.includes('model') && slotList.includes('style') &&
+            imageEditBase64List.length >= 2;
+          dualPresetKey = (matchModelPresetKey(task.model) || '').toLowerCase();
+          dualIsOpenAIImage = dualPresetKey.startsWith('gpt-image');
+          dualIsGoogle = dualPresetKey.startsWith('nano-banana') || dualPresetKey.startsWith('gemini');
+          dualIsVolc = dualPresetKey.startsWith('seedream') || dualPresetKey.startsWith('jimeng');
+          dualIsGrok = dualPresetKey.startsWith('grok');
+          dualIsWan = dualPresetKey.startsWith('wan');
+          // eslint-disable-next-line no-console
+          if (isDualSlotTryon) {
+            logger.info(`${debugPrefix} 👕 双槽款式上身：参考图顺序=[图1衣服款式, 图2模特底图], 模型=${task.model}, family=` +
+              `${dualIsOpenAIImage ? 'openai-edits' : dualIsGoogle ? 'google-chat' : dualIsVolc ? 'volc-gen' : dualIsGrok ? 'grok-edits' : dualIsWan ? 'wan-chat' : 'generic'}`);
+          }
+
+          // 双槽核心兜底：无论用户输入长/短提示词，都在前面追加结构化参考图角色说明，
+          // 明确"图1=衣服款式、图2=模特底图、以图2为底图换衣"，避免用户短提示词导致模型张冠李戴。
+          // 图片顺序已保证：imageEditBase64List[0]=衣服(图1)，[1]=模特(图2)。
+          buildDualSlotInstruction = (): string => {
+            if (!isDualSlotTryon) return '';
+            if (dualIsGrok) {
+              // xAI Grok：多图引用用 <IMAGE_0>/<IMAGE_1>（从0开始），图1衣服=<IMAGE_0>，图2模特=<IMAGE_1>
+              return `[<IMAGE_0>=衣服款式图（平铺/挂拍单品），<IMAGE_1>=模特照片（底图）。以 <IMAGE_1> 为底图，严格保持其模特的面部、五官、发型、身材、姿势、肤色与拍摄场景、灯光完全不变，不得更换模特或重新生成人物；仅将 <IMAGE_0> 中的服装（颜色、图案、材质、版型）穿到 <IMAGE_1> 模特身上，自然贴合垂坠，服装光影与 <IMAGE_1> 一致。]\n\n用户提示词：`;
+            }
+            // OpenAI gpt-image / Google Nano Banana / 火山 Seedream / Wan / 通用：图1=衣服，图2=模特底图
+            return `[参考图1=衣服款式图（平铺/挂拍单品），参考图2=模特底图。以参考图2为底图，保持参考图2模特的面部、五官、发型、身材、姿势、肤色与场景背景、灯光完全不变，不得更换模特或重新生成人物；仅将参考图1中的服装（颜色、图案、材质、版型）穿到参考图2模特身上，保持该服装细节不变，自然贴合垂坠，服装光影与参考图2一致。]\n\n用户提示词：`;
+          };
+
           // eslint-disable-next-line no-console
           logger.info(`${debugPrefix} 🖼️ 全部 ${imageEditFiles.length} 张参考图处理完成`);
         } catch (e) {
@@ -948,6 +1005,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           endpoints.push(...buildVarEndpoints());
         } else if (mode === 'chat') {
           endpoints.push(...buildChatEndpoints());
+        } else if (isDualSlotTryon) {
+          // 双槽款式上身：按各模型家族原生多图参考能力选首选端点（研究结论：）
+          // - gpt-image：/images/edits 多图 formdata（重复 append image，第1张=底图）
+          // - Nano Banana/Gemini：/chat/completions 多模态（交错图标签）
+          // - 火山 Seedream：/images/generations + 顶层 image 数组
+          // - Grok：/images/edits JSON images 数组；Wan：多模态 chat
+          if (dualIsGoogle) {
+            endpoints.push(...buildChatEndpoints());
+            endpoints.push(...buildEditEndpoints());
+          } else if (dualIsVolc) {
+            endpoints.push(...buildGenEndpoints());
+            endpoints.push(...buildChatEndpoints());
+          } else if (dualIsOpenAIImage) {
+            endpoints.push(...buildEditEndpoints());
+          } else if (dualIsGrok) {
+            endpoints.push(...buildEditEndpoints());
+            endpoints.push(...buildChatEndpoints());
+          } else if (dualIsWan) {
+            endpoints.push(...buildChatEndpoints());
+            endpoints.push(...buildEditEndpoints());
+          } else {
+            endpoints.push(...buildEditEndpoints());
+            endpoints.push(...buildChatEndpoints());
+            endpoints.push(...buildGenEndpoints());
+          }
+          // eslint-disable-next-line no-console
+          logger.info(`${debugPrefix} 👕 双槽端点策略：${endpoints.map(e => e.split('/v1/').pop() || e.split('/').pop()).join(' → ')}`);
         } else {
           // auto：根据模型类型决定优先顺序（修复：此前只计算 presetKey 未向 endpoints 添加任何端点，
           // 导致图生图端点数组为空、请求从未发出，报"所有图生图端点均不可用"）
@@ -996,7 +1080,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const hasEndpointCache = !!cachedEndpointUrl && cachedFailures < 2;
 
       const effectiveEndpoints: string[] = [];
-      if (hasEndpointCache && cachedEndpointUrl) {
+      // 双槽款式上身：跳过单图端点缓存，强制按双图策略探测，避免单图成功形状与双图不匹配
+      if (!isDualSlotTryon && hasEndpointCache && cachedEndpointUrl) {
         // 端点规范化：旧版本可能缓存了单数 /images/edit，自动转为复数 /images/edits
         let normalizedEndpoint = cachedEndpointUrl;
         if (normalizedEndpoint.endsWith('/images/edit') && !normalizedEndpoint.endsWith('/images/edits')) {
@@ -1276,8 +1361,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               const hasValidCache = !!cachedStrategy && (apiConfig.cachedImageEditStrategyFailures || 0) < 3;
 
               // 如果有缓存且命中当前端点类型，直接用缓存策略（只尝试1种，加速）
+              // 双槽款式上身：跳过策略缓存，按家族原生双图形状重新探测（单图成功形状≠双图形状）
               let useCacheStrategy = false;
-              if (hasValidCache && cachedStrategy) {
+              if (!isDualSlotTryon && hasValidCache && cachedStrategy) {
                 const cacheEndpointType = cachedStrategy.endpointType;
                 if (
                   (cacheEndpointType === 'generations' && isGenEndpoint) ||
@@ -1439,23 +1525,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
                   if (attempt.format === 'chat') {
                     // ===== chat/completions 多模态方式 =====
-                    // 多图时在提示词前标注参考图序号
                     const refCount = imageEditBase64List.length;
                     let promptText = String(variant.body.prompt || '');
-                    if (refCount > 1) {
+                    // 双槽：用 slot 感知指令；否则维持原有泛化编号
+                    const dualInstr = buildDualSlotInstruction();
+                    if (dualInstr) {
+                      promptText = dualInstr + promptText;
+                    } else if (refCount > 1) {
                       const refLabels = Array.from({ length: refCount }, (_, i) => `参考图${i + 1}`).join('、');
                       promptText = `[共 ${refCount} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                     }
-                    const chatContent: Array<Record<string, unknown>> = [
-                      { type: 'text', text: promptText },
-                    ];
-                    // 所有参考图按顺序作为 image_url 块追加
-                    imageEditBase64List.forEach((b64, idx) => {
-                      chatContent.push({
-                        type: 'image_url',
-                        image_url: { url: b64 },
+                    const chatContent: Array<Record<string, unknown>> = [];
+                    if (isDualSlotTryon && imageEditBase64List.length >= 2) {
+                      // Google/Gemini 官方最佳实践：每张图前插文字标签，再发图，最后放指令。
+                      // 顺序=图1衣服款式 → 图2模特底图（与结构化指令编号一致）
+                      chatContent.push({ type: 'text', text: '图1：衣服款式图（平铺/挂拍单品）' });
+                      chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[0] } });
+                      chatContent.push({ type: 'text', text: '图2：模特照片（底图，须保留其脸/姿势/背景）' });
+                      chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[1] } });
+                      for (let ei = 2; ei < imageEditBase64List.length; ei++) {
+                        chatContent.push({ type: 'text', text: `图${ei + 1}` });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[ei] } });
+                      }
+                      chatContent.push({ type: 'text', text: promptText });
+                    } else {
+                      chatContent.push({ type: 'text', text: promptText });
+                      imageEditBase64List.forEach((b64) => {
+                        chatContent.push({ type: 'image_url', image_url: { url: b64 } });
                       });
-                    });
+                    }
                     const chatBody = {
                       model: variant.body.model,
                       n: variant.body.n || 1,
@@ -1514,12 +1612,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     } else if (isEditEndpoint) {
                       fd.append('strength', strength);
                     }
+                    // 双槽 gpt-image：input_fidelity=high 锁定模特五官/身份，避免重新生成新脸
+                    if (isDualSlotTryon && dualIsOpenAIImage) {
+                      fd.append('input_fidelity', 'high');
+                    }
 
                     // variations 端点不需要 prompt
                     if (!isVarEndpoint && attempt.extraParams.__useMask !== 'true' ? true : !isVarEndpoint) {
                       let promptText = String(variant.body.prompt || '');
-                      // 多图时标注参考图数量和顺序
-                      if (imageEditFiles.length > 1) {
+                      // 双槽：用 slot 感知指令；否则维持原有泛化编号
+                      const dualInstr = buildDualSlotInstruction();
+                      if (dualInstr) {
+                        promptText = dualInstr + promptText;
+                      } else if (imageEditFiles.length > 1) {
                         const refLabels = Array.from({ length: imageEditFiles.length }, (_, i) => `参考图${i + 1}`).join('、');
                         promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                       }
@@ -1561,17 +1666,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     const jsonBody: Record<string, unknown> = {
                       ...variant.body,
                     };
-                    // 多图时给 prompt 加参考图序号说明
-                    if (imageEditBase64List.length > 1 && jsonBody.prompt) {
+                    // 双槽：用 slot 感知结构化指令兜底；否则维持原有泛化编号
+                    const dualInstr = buildDualSlotInstruction();
+                    if (dualInstr && jsonBody.prompt) {
+                      jsonBody.prompt = dualInstr + String(jsonBody.prompt);
+                    } else if (imageEditBase64List.length > 1 && jsonBody.prompt) {
                       const refLabels = Array.from({ length: imageEditBase64List.length }, (_, i) => `参考图${i + 1}`).join('、');
                       jsonBody.prompt = `[共 ${imageEditBase64List.length} 张参考图：${refLabels}，按顺序排列]\n${String(jsonBody.prompt)}`;
                     }
                     if (imageEditBase64List.length === 1) {
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
+                    } else if (isDualSlotTryon && dualIsVolc) {
+                      // 火山 Seedream：顶层 image 字段直接传数组（图1衣服, 图2模特底图），官方多图参考格式
+                      jsonBody.image = imageEditBase64List.slice(0, 14);
                     } else {
-                      // 多图：只用 images 数组字段，去掉冗余的 image_0/images[0] 等导致JSON解析错误
+                      // 多图：images 数组字段；同时保留第一张用原字段名（部分API只认单图字段）
                       jsonBody.images = imageEditBase64List;
-                      // 同时保留第一张用原字段名（部分API只认单图字段）
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
                     }
                     // 图生图关键参数：mode + image_weight（只有attempt明确要求时才添加，避免第三方平台不支持导致失败）
@@ -1969,12 +2079,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 const jsonBody: Record<string, unknown> = { ...successVariantBodyForFill };
                 if (imageEditBase64List.length === 1) {
                   jsonBody[fieldName] = imageEditBase64List[0];
+                } else if (isDualSlotTryon && dualIsVolc) {
+                  jsonBody.image = imageEditBase64List.slice(0, 14);
                 } else {
                   jsonBody.images = imageEditBase64List;
                   jsonBody[fieldName] = imageEditBase64List[0];
                 }
-                // 多图时给 prompt 加参考图序号说明
-                if (imageEditBase64List.length > 1 && jsonBody.prompt) {
+                // 双槽：用 slot 感知结构化指令兜底；否则维持泛化编号
+                const fillDualInstr = buildDualSlotInstruction();
+                if (fillDualInstr && jsonBody.prompt) {
+                  jsonBody.prompt = fillDualInstr + String(jsonBody.prompt);
+                } else if (imageEditBase64List.length > 1 && jsonBody.prompt) {
                   const refLabels = Array.from({ length: imageEditBase64List.length }, (_, k) => `参考图${k + 1}`).join('、');
                   jsonBody.prompt = `[共 ${imageEditBase64List.length} 张参考图：${refLabels}，按顺序排列]\n${String(jsonBody.prompt)}`;
                 }
@@ -1998,11 +2113,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 }
                 if (!isVarEndpoint) {
                   let promptText = String(successVariantBodyForFill.prompt || '');
-                  if (imageEditFiles.length > 1) {
+                  const fillDualInstr = buildDualSlotInstruction();
+                  if (fillDualInstr) {
+                    promptText = fillDualInstr + promptText;
+                  } else if (imageEditFiles.length > 1) {
                     const refLabels = Array.from({ length: imageEditFiles.length }, (_, k) => `参考图${k + 1}`).join('、');
                     promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                   }
                   fd.append('prompt', promptText);
+                }
+                // 双槽 gpt-image 补齐同样加 input_fidelity=high 锁脸
+                if (isDualSlotTryon && dualIsOpenAIImage) {
+                  fd.append('input_fidelity', 'high');
                 }
                 fd.append('model', String(successVariantBodyForFill.model || ''));
                 if (successVariantBodyForFill.n !== undefined) fd.append('n', '1');
@@ -2107,7 +2229,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   // variations 不需要 prompt
                   if (!endpoint.includes('/images/variations')) {
                     let promptText = String(variant.body.prompt || '');
-                    if (imageEditFiles.length > 1) {
+                    const singleDualInstr = buildDualSlotInstruction();
+                    if (singleDualInstr) {
+                      promptText = singleDualInstr + promptText;
+                    } else if (imageEditFiles.length > 1) {
                       const refLabels = Array.from({ length: imageEditFiles.length }, (_, i) => `参考图${i + 1}`).join('、');
                       promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                     }
@@ -2125,6 +2250,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     fd.append('image_weight', singleStrength);
                   } else if (endpoint.includes('/images/edit')) {
                     fd.append('strength', singleStrength);
+                  }
+                  // 双槽 gpt-image：input_fidelity=high 锁脸
+                  if (isDualSlotTryon && dualIsOpenAIImage) {
+                    fd.append('input_fidelity', 'high');
                   }
                   singleRequestBody = fd;
                 } else {

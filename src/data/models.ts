@@ -17,6 +17,8 @@ export interface IReferenceImage {
   url: string;
   name: string;
   size: number;
+  /** 参考图槽位：区分上传用途（如款式上身 = style款式 / model模特），普通参考图留空 */
+  slot?: string;
 }
 
 // 生成结果
@@ -52,6 +54,10 @@ export interface ITask {
   quality: string;
   imageCount: number;
   results: IGenerateResult[];
+  /** 当前应用的功能模板 id（如款式上身 shoot-tryon），用于驱动参考图槽位布局 */
+  featureId?: string;
+  /** 独立工作面板专属任务（如款式上身模式），主工作台隐藏显示 */
+  featureStudio?: boolean;
   background?: string;
   /** 视频生成时长（秒），视频功能任务特有 */
   duration?: number;

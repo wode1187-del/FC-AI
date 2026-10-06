@@ -48,7 +48,7 @@ import { logger, scopedStorage } from '@lark-apaas/client-toolkit-lite';
 import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
 import { useApp } from '@/context/AppContext';
-import { isVideoModel } from '@/data/featureTemplates';
+import { isVideoModel, getFeatureTemplate } from '@/data/featureTemplates';
 import { getResolutionGroups, type ITask } from '@/data/models';
 import type { ITextOptimizeConfig } from '@/data/models';
 import { useNavigate } from 'react-router-dom';
@@ -506,7 +506,7 @@ export default function TaskTable() {
     });
   }, []);
 
-  const handleAddReferenceImage = useCallback((taskId: string, files: FileList | File[] | null) => {
+  const handleAddReferenceImage = useCallback((taskId: string, files: FileList | File[] | null, slot?: string) => {
     if (!files || files.length === 0) return;
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
@@ -523,6 +523,7 @@ export default function TaskTable() {
       url: URL.createObjectURL(file),
       name: file.name,
       size: file.size,
+      ...(slot ? { slot } : {}),
     }));
     updateTask(taskId, { referenceImages: [...task.referenceImages, ...newImages] });
     if (fileArr.length > remaining) {
@@ -937,6 +938,23 @@ export default function TaskTable() {
                        >
                          {statusLabel(task.status)}
                        </Badge>
+                      {(() => {
+                        const tpl = task.featureId ? getFeatureTemplate(task.featureId) : undefined;
+                        const featName = tpl?.name;
+                        return (
+                          <span
+                            className={`inline-flex items-center gap-1 text-xs font-medium rounded-md px-1.5 py-0.5 w-fit ${
+                              featName
+                                ? 'bg-primary/10 text-primary border border-primary/25'
+                                : 'bg-muted/60 text-foreground/80 border border-border/70'
+                            }`}
+                            title={featName ? `调用功能：${featName}` : '调用功能：批量生成'}
+                          >
+                            <span className="text-[11px] leading-none">{tpl?.icon || '📋'}</span>
+                            {featName || '批量生成'}
+                          </span>
+                        );
+                      })()}
                       {getTaskDurationText(task) && (
                         <span className="text-[10px] text-muted-foreground tabular-nums whitespace-nowrap">
                           耗时 {getTaskDurationText(task)}
@@ -995,83 +1013,147 @@ export default function TaskTable() {
                         </div>
                       </div>
 
-                      {/* 图片网格 */}
-                      {task.referenceImages.length > 0 && (
-                        <div className="flex flex-wrap gap-2">
-                          {task.referenceImages.map((img, imgIdx) => {
-                            const isDragging = refDragInfo?.taskId === task.id && refDragInfo.fromIndex === imgIdx;
-                            return (
-                              <div
-                                key={img.id}
-                                draggable
-                                onDragStart={() => handleRefDragStart(task.id, imgIdx)}
-                                onDragOver={(e) => handleRefDragOver(e, task.id)}
-                                onDrop={(e) => { e.preventDefault(); handleRefDrop(task.id, imgIdx); }}
-                                className={`group relative flex flex-col items-center transition-all ${isDragging ? 'opacity-40 scale-95' : ''}`}
-                                title="拖拽可调整顺序"
-                              >
-                                <div className="relative w-[90px] h-[120px] rounded-lg overflow-hidden border border-border/60 bg-muted/30 cursor-grab hover:shadow-md transition-shadow active:cursor-grabbing" onClick={(e) => { e.stopPropagation(); setPreviewImage({ url: img.url, name: img.name || `参考图${imgIdx + 1}` }); }} title="点击预览，拖拽排序">
-                                  <Image
-                                    src={img.url}
-                                    alt={img.name || `参考图${imgIdx + 1}`}
-                                    className="w-full h-full object-cover pointer-events-none"
-                                    draggable={false}
-                                    onError={() => handleRemoveReferenceImage(task.id, imgIdx)}
-                                  />
-                                  {/* 序号徽章 */}
-                                  <div className={`absolute top-1.5 left-1.5 size-6 rounded-full text-white text-xs font-bold flex items-center justify-center ${imgIdx === 0 ? 'bg-primary' : 'bg-secondary/90'}`}>
-                                    {imgIdx + 1}
+                      
+                              {(() => {
+                                const slots = (task.featureId ? getFeatureTemplate(task.featureId)?.referenceSlots : undefined) || [];
+                                if (slots.length === 0) {
+                                  return (
+                                    <>
+                                      {/* 图片网格 */}
+                                      {task.referenceImages.length > 0 && (
+                                        <div className="flex flex-wrap gap-2">
+                                          {task.referenceImages.map((img, imgIdx) => {
+                                            const isDragging = refDragInfo?.taskId === task.id && refDragInfo.fromIndex === imgIdx;
+                                            return (
+                                              <div
+                                                key={img.id}
+                                                draggable
+                                                onDragStart={() => handleRefDragStart(task.id, imgIdx)}
+                                                onDragOver={(e) => handleRefDragOver(e, task.id)}
+                                                onDrop={(e) => { e.preventDefault(); handleRefDrop(task.id, imgIdx); }}
+                                                className={`group relative flex flex-col items-center transition-all ${isDragging ? 'opacity-40 scale-95' : ''}`}
+                                                title="拖拽可调整顺序"
+                                              >
+                                                <div className="relative w-[90px] h-[120px] rounded-lg overflow-hidden border border-border/60 bg-muted/30 cursor-grab hover:shadow-md transition-shadow active:cursor-grabbing" onClick={(e) => { e.stopPropagation(); setPreviewImage({ url: img.url, name: img.name || `参考图${imgIdx + 1}` }); }} title="点击预览，拖拽排序">
+                                                  <Image
+                                                    src={img.url}
+                                                    alt={img.name || `参考图${imgIdx + 1}`}
+                                                    className="w-full h-full object-cover pointer-events-none"
+                                                    draggable={false}
+                                                    onError={() => handleRemoveReferenceImage(task.id, imgIdx)}
+                                                  />
+                                                  <div className={`absolute top-1.5 left-1.5 size-6 rounded-full text-white text-xs font-bold flex items-center justify-center ${imgIdx === 0 ? 'bg-primary' : 'bg-secondary/90'}`}>
+                                                    {imgIdx + 1}
+                                                  </div>
+                                                  {imgIdx === 0 && (
+                                                    <div className="absolute top-1.5 right-1.5 bg-primary text-white text-[10px] px-1.5 py-0.5 rounded-full font-medium">
+                                                      主图
+                                                    </div>
+                                                  )}
+                                                </div>
+                                                <div className="flex gap-1 mt-1.5 w-[90px]">
+                                                  <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    className="h-7 flex-1 text-[11px] bg-background hover:bg-accent text-primary"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      setEditorImage({ taskId: task.id, imgIndex: imgIdx, url: img.url, name: img.name || `参考图${imgIdx + 1}` });
+                                                    }}
+                                                  >
+                                                    编辑
+                                                  </Button>
+                                                  <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    className="h-7 flex-1 text-[11px] text-destructive hover:text-destructive hover:bg-destructive/10 bg-background"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      handleRemoveReferenceImage(task.id, imgIdx);
+                                                    }}
+                                                  >
+                                                    <Trash2 className="size-3" />
+                                                  </Button>
+                                                </div>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      )}
+                                      {/* 拖放区域 */}
+                                      <div
+                                        className="border-2 border-dashed border-border/50 rounded-xl bg-muted/30 py-6 px-4 text-center cursor-pointer hover:border-primary/50 hover:bg-accent/30 transition-colors"
+                                        onClick={() => document.getElementById(`ref-upload-${task.id}`)?.click()}
+                                      >
+                                        <div className="text-base font-semibold text-foreground mb-1.5">
+                                          拖入图片或 Ctrl+V 粘贴
+                                        </div>
+                                        <div className="text-xs text-muted-foreground">
+                                          支持单张、批量图片，也可添加整个文件夹
+                                        </div>
+                                      </div>
+                                    </>
+                                  );
+                                }
+                                return (
+                                  <div className="grid grid-cols-2 gap-2.5">
+                                    {slots.map((s) => {
+                                      const slotImgs = task.referenceImages.filter((im) => (im.slot || slots[0].id) === s.id);
+                                      return (
+                                        <div
+                                          key={s.id}
+                                          className="rounded-xl border border-border/70 bg-background/60 p-2.5 space-y-2"
+                                          tabIndex={0}
+                                          onDragOver={(e) => e.preventDefault()}
+                                          onDrop={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                                              handleAddReferenceImage(task.id, e.dataTransfer.files, s.id);
+                                            }
+                                          }}
+                                          onPaste={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            const files = Array.from(e.clipboardData?.files || []);
+                                            if (files.length > 0) handleAddReferenceImage(task.id, files, s.id);
+                                          }}
+                                        >
+                                          <div className="flex items-center gap-1.5">
+                                            <div className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+                                              <span className="text-base">{s.icon}</span>{s.label}
+                                            </div>
+                                          </div>
+                                          {slotImgs.length > 0 && (
+                                            <div className="flex flex-wrap gap-1.5">
+                                              {slotImgs.map((img, i) => (
+                                                <div key={img.id} className="relative w-[62px] h-[82px] rounded-lg overflow-hidden border border-border/60 bg-muted/30 group cursor-pointer" onClick={() => setPreviewImage({ url: img.url, name: img.name || s.label })} title="点击预览">
+                                                  <Image src={img.url} alt={img.name || s.label} className="w-full h-full object-cover pointer-events-none" draggable={false} onError={() => handleRemoveReferenceImage(task.id, task.referenceImages.indexOf(img))} />
+                                                  <div className="absolute top-1 left-1 size-4 rounded-full bg-primary/80 text-white text-[9px] font-bold flex items-center justify-center">{i + 1}</div>
+                                                  <button className="absolute bottom-1 right-1 size-5 rounded bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); handleRemoveReferenceImage(task.id, task.referenceImages.indexOf(img)); }} title="删除">
+                                                    <Trash2 className="size-3" />
+                                                  </button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                          <div className="border-2 border-dashed border-border/50 rounded-lg bg-muted/20 py-3 px-2 text-center cursor-pointer hover:border-primary/50 hover:bg-accent/30 transition-colors" onClick={() => document.getElementById(`ref-upload-${task.id}-${s.id}`)?.click()}>
+                                            <div className="flex justify-center mb-1">
+                                              <div className="size-8 rounded-full bg-accent/70 flex items-center justify-center"><ImagePlus className="size-4 text-muted-foreground" /></div>
+                                            </div>
+                                            <div className="text-[11px] text-foreground mb-0.5">点击/粘贴/拖拽上传</div>
+                                            <div className="text-[9px] text-muted-foreground">PNG, JPG or WebP，最多支持4张</div>
+                                          </div>
+                                          <Button variant="outline" size="sm" className="w-full h-8 text-xs bg-background hover:bg-accent" onClick={() => document.getElementById(`ref-upload-${task.id}-${s.id}`)?.click()}>
+                                            <FolderPlus className="size-3.5 mr-1" />图库上传
+                                          </Button>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
-                                  {/* 主图标识 */}
-                                  {imgIdx === 0 && (
-                                    <div className="absolute top-1.5 right-1.5 bg-primary text-white text-[10px] px-1.5 py-0.5 rounded-full font-medium">
-                                      主图
-                                    </div>
-                                  )}
-                                </div>
-                                {/* 底部操作按钮 */}
-                                <div className="flex gap-1 mt-1.5 w-[90px]">
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="h-7 flex-1 text-[11px] bg-background hover:bg-accent text-primary"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setEditorImage({ taskId: task.id, imgIndex: imgIdx, url: img.url, name: img.name || `参考图${imgIdx + 1}` });
-                                    }}
-                                  >
-                                    编辑
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="h-7 flex-1 text-[11px] text-destructive hover:text-destructive hover:bg-destructive/10 bg-background"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleRemoveReferenceImage(task.id, imgIdx);
-                                    }}
-                                  >
-                                    <Trash2 className="size-3" />
-                                  </Button>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {/* 拖放区域 */}
-                      <div
-                        className="border-2 border-dashed border-border/50 rounded-xl bg-muted/30 py-6 px-4 text-center cursor-pointer hover:border-primary/50 hover:bg-accent/30 transition-colors"
-                        onClick={() => document.getElementById(`ref-upload-${task.id}`)?.click()}
-                      >
-                        <div className="text-base font-semibold text-foreground mb-1.5">
-                          拖入图片或 Ctrl+V 粘贴
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          支持单张、批量图片，也可添加整个文件夹
-                        </div>
-                      </div>
+                                );
+                              })()}
+                            
                     </div>
                   </div>
 
@@ -1100,6 +1182,24 @@ export default function TaskTable() {
                       e.currentTarget.value = '';
                     }}
                   />
+                  {/* 参考图槽位独立上传控件（款式上身等双参考功能） */}
+                  {(() => {
+                    const slots = (task.featureId ? getFeatureTemplate(task.featureId)?.referenceSlots : undefined) || [];
+                    return slots.map((s) => (
+                      <input
+                        key={s.id}
+                        id={`ref-upload-${task.id}-${s.id}`}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => {
+                          handleAddReferenceImage(task.id, e.target.files, s.id);
+                          e.currentTarget.value = '';
+                        }}
+                      />
+                    ));
+                  })()}
                 </td>
 
                 {/* Prompt */}
