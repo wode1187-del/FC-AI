@@ -503,14 +503,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (tpl.params.ratio) update.ratio = tpl.params.ratio;
     if (tpl.params.quality) update.quality = tpl.params.quality;
     if (tpl.params.duration) update.duration = tpl.params.duration;
-    // 双参考图功能（如款式上身：上传款式+上传模特）→ 创建独立任务行，且不污染新任务默认参数，
-    // 保证之后的『批量增行』仍是普通任务，与款式上身区分开
-    if (tpl.referenceSlots && tpl.referenceSlots.length > 0) {
-      addTask(update);
-    } else {
-      applyParamsToAll(update);
-      setNewTaskParamsState(prev => ({ ...prev, ...update }));
-    }
+    // 所有功能模板点击后都自动创建任务行，让用户直接看到对应的任务条
+    addTask(update);
     return tpl;
   }, [applyParamsToAll, addTask, setNewTaskParamsState]);
 
@@ -560,8 +554,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     // 追加模式：记录本次追加张数，更新总张数用于占位框显示
     const appendCount = task.imageCount || 1;
-    const requestedCount = append ? appendCount : (task.imageCount || 1);  // 本次实际请求的张数
-    const totalImageCount = append ? task.results.length + appendCount : (task.imageCount || 1);
+    // 不支持一次返回多张的模型，强制 n=1，避免自动补齐多次请求重复扣费
+    const modelLower = task.model.toLowerCase();
+    const supportsBatch = modelLower.includes('gpt-image'); // 仅 gpt-image 系列官方支持 n>1
+    const actualRequestedCount = supportsBatch ? (append ? appendCount : (task.imageCount || 1)) : 1;
+    const requestedCount = actualRequestedCount;
+    const totalImageCount = supportsBatch ? (append ? task.results.length + appendCount : (task.imageCount || 1)) : (append ? task.results.length + 1 : 1);
 
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'generating', imageCount: totalImageCount, errorMsg: undefined, startedAt: Date.now(), completedAt: undefined, durationMs: undefined } : t));
 
@@ -725,8 +723,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
 
-      // 负向提示词
-      if (task.negativePrompt?.trim()) {
+      // 负向提示词（gpt-image 系列官方不支持 negative_prompt，跳过）
+      if (task.negativePrompt?.trim() && !presetKey?.startsWith('gpt-image')) {
         body.negative_prompt = task.negativePrompt;
       }
 
@@ -751,8 +749,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       let dualIsVolc = false;
       let dualIsGrok = false;
       let dualIsWan = false;
+      let isFaceSwap = false;
+      let isBgSwap = false;
       // 按模型家族生成 slot 感知指令前缀（函数作用域，供 chat/formdata/json 三处分支调用）
       let buildDualSlotInstruction: () => string = () => '';
+      // 色彩保真指令后缀（根据 task.colorLevel/colorScope/colorIntensity 生成）
+      let buildColorPreserveSuffix: () => string = () => '';
 
       // 压缩图片：最长边限制为 maxSize，质量 quality，输出 JPEG
       const compressImage = async (file: File, maxSize = 2048, quality = 0.85): Promise<File> => {
@@ -841,7 +843,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // eslint-disable-next-line no-console
         logger.info(`${debugPrefix} 🖼️ 参考图 URL 类型检测:`, { arg0: url.substring(0, 30), arg1: '...' });
         const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`参考图加载失败(HTTP ${resp.status})，可能是页面刷新后图片链接已过期，请重新上传参考图`);
         const blob = await resp.blob();
+        if (!blob || blob.size === 0) throw new Error('参考图为空文件，请重新上传');
         const ext = name.split('.').pop()?.toLowerCase() || 'png';
         let mime = blob.type;
         if (!mime || mime === 'application/octet-stream') {
@@ -864,7 +868,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // 按 slot 排序：衣服款式(style)在前=参考图1，模特底图(model)在后=参考图2。
           // 该顺序与界面槽位（上传款式→上传模特）及用户手输提示词的"图1衣服、图2模特"一致，
           // 也与系统追加的结构化角色前缀编号对齐，避免编号错位导致换衣混乱。
-          const slotOrder = (slot?: string) => (slot === 'style' ? 0 : slot === 'model' ? 1 : 2);
+          const slotOrder = (slot?: string) => {
+            if (slot === 'style' || slot === 'base') return 0;  // 底图/衣服=图1
+            if (slot === 'model' || slot === 'face') return 1;  // 模特/人脸=图2
+            return 2;
+          };
           const sortedRefs = [...refs].sort((a, b) => slotOrder(a.slot) - slotOrder(b.slot));
           // 并行处理所有参考图
           const processed = await Promise.all(
@@ -881,12 +889,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           imageEditBase64List = processed.map((p) => p.b64);
           isImageEditMode = true;
 
-          // ===== 双槽（款式上身）检测：同时有 style 槽(衣服款式=图1) 与 model 槽(模特底图=图2) =====
-          // sortedRefs 已按 slotOrder 排序：style=0(图1衣服) 在前，model=1(图2模特) 在后
+          // ===== 双槽检测：款式上身(style+model) 或 智能换脸(base+face) =====
+          // sortedRefs 已按 slotOrder 排序：底图=图1在前，人脸/模特=图2在后
           const slotList = sortedRefs.map((r) => r.slot || '');
+          const isStyleModel = slotList.includes('model') && slotList.includes('style');
+          const isBaseFace = slotList.includes('base') && slotList.includes('face');
+          const isBaseBg = slotList.includes('base') && slotList.includes('bg');
+          const isBaseColor = slotList.includes('base') && slotList.includes('color');
           isDualSlotTryon = isImageEditMode &&
-            slotList.includes('model') && slotList.includes('style') &&
+            (isStyleModel || isBaseFace || isBaseBg || isBaseColor) &&
             imageEditBase64List.length >= 2;
+          isFaceSwap = isBaseFace && !isStyleModel;
+          isBgSwap = isBaseBg && !isStyleModel && !isBaseFace;
           dualPresetKey = (matchModelPresetKey(task.model) || '').toLowerCase();
           dualIsOpenAIImage = dualPresetKey.startsWith('gpt-image');
           dualIsGoogle = dualPresetKey.startsWith('nano-banana') || dualPresetKey.startsWith('gemini');
@@ -895,7 +909,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           dualIsWan = dualPresetKey.startsWith('wan');
           // eslint-disable-next-line no-console
           if (isDualSlotTryon) {
-            logger.info(`${debugPrefix} 👕 双槽款式上身：参考图顺序=[图1衣服款式, 图2模特底图], 模型=${task.model}, family=` +
+            logger.info(`${debugPrefix} 👥 双槽${isFaceSwap ? '智能换脸' : '款式上身'}：参考图顺序=[图1${isFaceSwap ? '原模特底图' : '衣服款式'}, 图2${isFaceSwap ? '目标人脸' : '模特底图'}], 模型=${task.model}, family=` +
               `${dualIsOpenAIImage ? 'openai-edits' : dualIsGoogle ? 'google-chat' : dualIsVolc ? 'volc-gen' : dualIsGrok ? 'grok-edits' : dualIsWan ? 'wan-chat' : 'generic'}`);
           }
 
@@ -904,12 +918,63 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // 图片顺序已保证：imageEditBase64List[0]=衣服(图1)，[1]=模特(图2)。
           buildDualSlotInstruction = (): string => {
             if (!isDualSlotTryon) return '';
-            if (dualIsGrok) {
-              // xAI Grok：多图引用用 <IMAGE_0>/<IMAGE_1>（从0开始），图1衣服=<IMAGE_0>，图2模特=<IMAGE_1>
-              return `[<IMAGE_0>=衣服款式图（平铺/挂拍单品），<IMAGE_1>=模特照片（底图）。以 <IMAGE_1> 为底图，严格保持其模特的面部、五官、发型、身材、姿势、肤色与拍摄场景、灯光完全不变，不得更换模特或重新生成人物；仅将 <IMAGE_0> 中的服装（颜色、图案、材质、版型）穿到 <IMAGE_1> 模特身上，自然贴合垂坠，服装光影与 <IMAGE_1> 一致。]\n\n用户提示词：`;
+            // 智能换脸场景：图1=原模特底图，图2=目标人脸
+            if (isFaceSwap) {
+              if (dualIsGrok) {
+                return `[<IMAGE_0>=底图，<IMAGE_1>=目标人脸。以 <IMAGE_0> 为底图，除面部五官和脸型轮廓外每个像素原样保留不重绘不调色；唯一修改区域：眼睛、眉毛、鼻子、嘴唇、脸型轮廓、下颌线、颧骨、面部骨骼结构精确匹配 <IMAGE_1>；其他全部像素级不变。]\n\n用户提示词：`;
+              }
+              return `[参考图1=底图，参考图2=目标人脸。以参考图1为底图，除面部五官和脸型轮廓外，图1的每一个像素都必须原样保留，不得重绘、不得调色、不得修改任何细节。唯一允许的修改区域：面部五官和脸型轮廓——眼睛、眉毛、鼻子、嘴唇、脸型轮廓、下颌线、颧骨位置、面部骨骼结构，全部精确匹配图2的人脸特征。以下内容必须像素级保持图1原样：发际线、额头、头发、颈部、胸口、手臂、手部、服装、背景、灯光、阴影、肤色。换脸后面部肤色必须和图1颈部肤色完全一致，无缝衔接无色差。禁止重绘面部以外任何区域，禁止调整全局色调，禁止美化，禁止改变任何细节。]\n\n用户提示词：`;
             }
-            // OpenAI gpt-image / Google Nano Banana / 火山 Seedream / Wan / 通用：图1=衣服，图2=模特底图
-            return `[参考图1=衣服款式图（平铺/挂拍单品），参考图2=模特底图。以参考图2为底图，保持参考图2模特的面部、五官、发型、身材、姿势、肤色与场景背景、灯光完全不变，不得更换模特或重新生成人物；仅将参考图1中的服装（颜色、图案、材质、版型）穿到参考图2模特身上，保持该服装细节不变，自然贴合垂坠，服装光影与参考图2一致。]\n\n用户提示词：`;
+            // AI换背景场景：图1=原图（人物/商品），图2=背景图
+            if (isBgSwap) {
+              if (dualIsGrok) {
+                return `[<IMAGE_0>=原图（含人物/商品），<IMAGE_1>=背景图。严格保持 <IMAGE_0> 主体（面部、发型、肤色、服装、姿势）每个像素不变，不得调色不得重绘；仅将背景替换为 <IMAGE_1> 的场景，主体边缘自然融合。]\n\n用户提示词：`;
+              }
+              return `[参考图1=原图（含人物/商品），参考图2=背景图。严格保持参考图1主体（面部、五官、发型、肤色、服装颜色/图案/材质、姿势、手部、配饰）每一个像素完全不变，不得调色、不得重绘、不得改变任何细节和颜色；仅将参考图1的背景替换为参考图2的背景场景。主体与新背景之间边缘自然融合，主体本身的颜色和光影必须与参考图1完全一致，不得因新背景而偏色。]\n\n用户提示词：`;
+            }
+            // 款式上身场景：根据换装类型调整描述
+            const tryonType = task.tryonType || 'clothes';
+            const typeMap: Record<string, { item: string; itemLabel: string; action: string }> = {
+              clothes: { item: '服装', itemLabel: '衣服款式图（平铺/挂拍单品）', action: '穿到' },
+              pants: { item: '裤子', itemLabel: '裤子款式图', action: '穿到' },
+              inner: { item: '内搭', itemLabel: '内搭款式图', action: '穿到' },
+              skirt: { item: '裙子', itemLabel: '裙子款式图', action: '穿到' },
+              accessory: { item: '配饰', itemLabel: '配饰图（包/帽/围巾/首饰）', action: '佩戴到' },
+              shoes: { item: '鞋子', itemLabel: '鞋子款式图', action: '穿到' },
+            };
+            const t = typeMap[tryonType] || typeMap.clothes;
+            if (dualIsGrok) {
+              return `[<IMAGE_0>=${t.itemLabel}，<IMAGE_1>=模特照片（底图）。以 <IMAGE_1> 为底图，严格保持其模特的面部、五官、发型、身材、姿势、肤色与拍摄场景、灯光完全不变，不得更换模特或重新生成人物；仅将 <IMAGE_0> 中的${t.item}（颜色、图案、材质、版型）${t.action} <IMAGE_1> 模特身上，自然贴合垂坠，光影与 <IMAGE_1> 一致。]\n\n用户提示词：`;
+            }
+            return `[参考图1=${t.itemLabel}，参考图2=模特底图。以参考图2为底图，保持参考图2模特的面部、五官、发型、身材、姿势、肤色与场景背景、灯光完全不变，不得更换模特或重新生成人物；仅将参考图1中的${t.item}（颜色、图案、材质、版型）${t.action}参考图2模特身上，保持细节不变，自然贴合垂坠，光影与参考图2一致。]\n\n用户提示词：`;
+          };
+
+          // 色彩保真：根据 task.colorLevel/colorScope/colorIntensity 生成防偏色指令后缀
+          buildColorPreserveSuffix = (): string => {
+            const level = task.colorLevel;
+            if (!level) return '';
+            const scope = task.colorScope || [];
+            const intensity = task.colorIntensity ?? 75;
+            const levelText = level === 'ultra' ? '极致还原' : level === 'high' ? '高保真' : '标准';
+            const scopeMap: Record<string, string> = {
+              clothes: '严格保持参考图1服装的原始颜色、色相、饱和度、明度完全不变，禁止偏红、偏黄、偏绿、偏蓝、褪色、变色、色偏',
+              skin: '模特肤色保持自然真实，与参考图2一致，禁止偏色、过曝、苍白、色偏',
+              bg: '背景颜色与光线色调与参考图2一致，禁止偏色',
+              light: '保持原拍摄光线色温，禁止色温漂移、过度偏暖或偏冷',
+              wb: '白平衡中性准确，禁止色偏、滤镜色、饱和度异常',
+              nored: '禁止整体偏红、泛红、红色色温漂移、面部潮红，保持中性白平衡，画面不得偏暖红',
+            };
+            const parts: string[] = [];
+            if (scope.length > 0) {
+              scope.forEach(s => { if (scopeMap[s]) parts.push(scopeMap[s]); });
+            } else {
+              parts.push(scopeMap.clothes!, scopeMap.skin!);
+            }
+            if (task.lockClothesHue) {
+              parts.push('服装色相对比参考图1严格锁定，色相偏移不超过3度，不得偏色');
+            }
+            if (parts.length === 0) return '';
+            return `\n\n【色彩保真·${levelText}】${parts.join('；')}。整体色彩还原度${intensity}%，禁止色彩漂移、滤镜化。`;
           };
 
           // eslint-disable-next-line no-console
@@ -1012,23 +1077,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // - 火山 Seedream：/images/generations + 顶层 image 数组
           // - Grok：/images/edits JSON images 数组；Wan：多模态 chat
           if (dualIsGoogle) {
-            endpoints.push(...buildChatEndpoints());
-            endpoints.push(...buildEditEndpoints());
+            endpoints.push(buildChatEndpoints()[0]);
           } else if (dualIsVolc) {
-            endpoints.push(...buildGenEndpoints());
-            endpoints.push(...buildChatEndpoints());
+            endpoints.push(buildGenEndpoints()[0]);
           } else if (dualIsOpenAIImage) {
-            endpoints.push(...buildEditEndpoints());
+            endpoints.push(buildEditEndpoints()[0]);
           } else if (dualIsGrok) {
-            endpoints.push(...buildEditEndpoints());
-            endpoints.push(...buildChatEndpoints());
+            endpoints.push(buildEditEndpoints()[0]);
           } else if (dualIsWan) {
-            endpoints.push(...buildChatEndpoints());
-            endpoints.push(...buildEditEndpoints());
+            endpoints.push(buildChatEndpoints()[0]);
           } else {
-            endpoints.push(...buildEditEndpoints());
-            endpoints.push(...buildChatEndpoints());
-            endpoints.push(...buildGenEndpoints());
+            endpoints.push(buildEditEndpoints()[0]);
           }
           // eslint-disable-next-line no-console
           logger.info(`${debugPrefix} 👕 双槽端点策略：${endpoints.map(e => e.split('/v1/').pop() || e.split('/').pop()).join(' → ')}`);
@@ -1038,29 +1097,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const presetKeyForEndpoint = matchModelPresetKey(task.model);
           const presetLower = (presetKeyForEndpoint || '').toLowerCase();
           const isGptImage = presetLower.includes('gpt-image');
-          const isChatModel = presetLower.includes('grok') || presetLower.includes('gemini');
-          if (isGptImage) {
+          const isChatModel = presetLower.includes('grok') || presetLower.includes('gemini') || presetLower.includes('nano-banana');
+          if (isDualSlotTryon) {
+            // 双槽功能（换脸/款式上身/换背景）：只试首选端点一个URL，避免多端点探测扣费
+            endpoints.push(buildEditEndpoints()[0]);
+          } else if (isGptImage) {
             // OpenAI gpt-image 系：图生图标准端点为 /images/edits
-            endpoints.push(...buildEditEndpoints());
+            endpoints.push(buildEditEndpoints()[0]);
           } else if (isChatModel) {
-            // 多模态 chat 模型：chat 优先，edits 兜底
-            endpoints.push(...buildChatEndpoints());
-            endpoints.push(...buildEditEndpoints());
+            // 多模态 chat 模型：chat 端点
+            endpoints.push(buildChatEndpoints()[0]);
           } else {
-            // 其他模型：edits + chat + generations 兜底，由请求循环逐个尝试
-            endpoints.push(...buildEditEndpoints());
-            endpoints.push(...buildChatEndpoints());
-            endpoints.push(...buildGenEndpoints());
+            // 其他模型：edits 端点
+            endpoints.push(buildEditEndpoints()[0]);
           }
         }
         } else {
-          // 文生图模式：仅尝试最常用的 2 个端点，其他少见端点不再探测
+          // 文生图模式：只试一个端点，避免多端点探测扣费
           if (hasV1Suffix) {
             endpoints.push(`${rawBaseUrl}/images/generations`);
-            endpoints.push(`${baseWithoutV1}/v1/images/generations`);
           } else {
             endpoints.push(`${rawBaseUrl}/v1/images/generations`);
-            endpoints.push(`${rawBaseUrl}/images/generations`);
           }
         }
 
@@ -1150,7 +1207,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        // 格式4: chat/completions 多模态 { choices: [{ message: { content: [{image_url, image_file, image}] } }] }
+        // 格式4: chat/completions 多模态 { choices: [{ message: { content: [...] | "string" } }] }
         if (result.length === 0 && Array.isArray(obj.choices)) {
           for (const choice of obj.choices) {
             const content = choice?.message?.content;
@@ -1159,8 +1216,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 if (part?.image_url?.url) result.push(part.image_url.url);
                 else if (part?.image_file?.url) result.push(part.image_file.url);
                 else if (part?.image?.b64_json) result.push(`data:image/png;base64,${part.image.b64_json}`);
-                else if (typeof part === 'string') {
-                  // 跳过文本块，只取图片
+              }
+            } else if (typeof content === 'string') {
+              // content 是字符串：用正则提取所有 http(s) 图片URL
+              const urlMatches = content.match(/https?:\/\/[^\s\)\]"']+\.(?:png|jpg|jpeg|webp|gif|bmp)[^\s\)\]"']*/gi);
+              if (urlMatches) {
+                for (const url of urlMatches) {
+                  if (!result.includes(url)) result.push(url);
                 }
               }
             }
@@ -1450,30 +1512,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   extraParams: {},
                 });
               } else if (isEditEndpoint) {
-                // ====== edits 端点：图像编辑（精简为3种核心方案）======
-                // 首先尝试 image + mask（标准OpenAI方式，mask=全透明=整图编辑=图生图效果）
-                attempts.push({
-                  label: 'edits + mask(全透明) · field=image',
-                  mode: 'edits-mask',
-                  format: 'formdata',
-                  fieldName: 'image',
-                  extraParams: { __useMask: 'true' },
-                });
-                // 纯 image 字段
-                attempts.push({
-                  label: 'edits 基础 · field=image',
-                  mode: 'edits',
-                  format: 'formdata',
-                  fieldName: 'image',
-                  extraParams: {},
-                });
-                attempts.push({
-                  label: 'edits 基础 · field=images',
-                  mode: 'edits',
-                  format: 'formdata',
-                  fieldName: 'images',
-                  extraParams: {},
-                });
+                // ====== edits 端点：图像编辑 ======
+                // 双槽功能（换脸/款式上身）：只保留 field=image 一种方案，失败直接报错，不盲目探测扣费
+                if (isDualSlotTryon) {
+                  attempts.push({
+                    label: 'edits · field=image',
+                    mode: 'edits',
+                    format: 'formdata',
+                    fieldName: 'image',
+                    extraParams: {},
+                  });
+                } else {
+                  // 普通图生图：只保留 field=image 一种方案，避免多变体探测扣费
+                  attempts.push({
+                    label: 'edits 基础 · field=image',
+                    mode: 'edits',
+                    format: 'formdata',
+                    fieldName: 'image',
+                    extraParams: {},
+                  });
+                }
               } else if (isVarEndpoint) {
                 // ====== variations 端点（最不优先）======
                 attempts.push({
@@ -1535,19 +1593,52 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       const refLabels = Array.from({ length: refCount }, (_, i) => `参考图${i + 1}`).join('、');
                       promptText = `[共 ${refCount} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                     }
+                    const colorSuffix = buildColorPreserveSuffix();
+                    if (colorSuffix) promptText = promptText + colorSuffix;
                     const chatContent: Array<Record<string, unknown>> = [];
                     if (isDualSlotTryon && imageEditBase64List.length >= 2) {
                       // Google/Gemini 官方最佳实践：每张图前插文字标签，再发图，最后放指令。
-                      // 顺序=图1衣服款式 → 图2模特底图（与结构化指令编号一致）
-                      chatContent.push({ type: 'text', text: '图1：衣服款式图（平铺/挂拍单品）' });
-                      chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[0] } });
-                      chatContent.push({ type: 'text', text: '图2：模特照片（底图，须保留其脸/姿势/背景）' });
-                      chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[1] } });
-                      for (let ei = 2; ei < imageEditBase64List.length; ei++) {
-                        chatContent.push({ type: 'text', text: `图${ei + 1}` });
-                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[ei] } });
+                      if (isFaceSwap) {
+                        chatContent.push({ type: 'text', text: '图1（原模特底图）：' });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[0] } });
+                        chatContent.push({ type: 'text', text: '图2（目标人脸照片）：' });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[1] } });
+                        for (let ei = 2; ei < imageEditBase64List.length; ei++) {
+                          chatContent.push({ type: 'text', text: `图${ei + 1}：` });
+                          chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[ei] } });
+                        }
+                        chatContent.push({ type: 'text', text: '指令：以图1为底图，保持图1的身材、姿势、发型、服装、背景完全不变，只把图1的面部替换成图2的脸，五官特征照搬图2。' + promptText });
+                      } else if (isBgSwap) {
+                        chatContent.push({ type: 'text', text: '图1（原图/含人物商品）：' });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[0] } });
+                        chatContent.push({ type: 'text', text: '图2（目标背景图）：' });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[1] } });
+                        for (let ei = 2; ei < imageEditBase64List.length; ei++) {
+                          chatContent.push({ type: 'text', text: `图${ei + 1}：` });
+                          chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[ei] } });
+                        }
+                        chatContent.push({ type: 'text', text: '指令：保持图1主体每个像素完全不变，只把图1的背景替换成图2的背景场景，主体颜色和光影与图1一致。' + promptText });
+                      } else {
+                        const chatTypeMap: Record<string, string> = {
+                          clothes: '衣服款式图', pants: '裤子款式图', inner: '内搭款式图',
+                          skirt: '裙子款式图', accessory: '配饰图（包/帽/围巾/首饰）', shoes: '鞋子款式图',
+                        };
+                        const chatItemMap: Record<string, string> = {
+                          clothes: '衣服', pants: '裤子', inner: '内搭', skirt: '裙子',
+                          accessory: '配饰佩戴到', shoes: '鞋子',
+                        };
+                        const chatLabel = chatTypeMap[task.tryonType || 'clothes'] || '衣服款式图';
+                        const chatItem = chatItemMap[task.tryonType || 'clothes'] || '衣服';
+                        chatContent.push({ type: 'text', text: `图1（${chatLabel}）：` });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[0] } });
+                        chatContent.push({ type: 'text', text: '图2（模特照片底图）：' });
+                        chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[1] } });
+                        for (let ei = 2; ei < imageEditBase64List.length; ei++) {
+                          chatContent.push({ type: 'text', text: `图${ei + 1}：` });
+                          chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[ei] } });
+                        }
+                        chatContent.push({ type: 'text', text: `指令：将图1的${chatItem}${chatItem === '配饰佩戴到' ? '' : '穿'}到图2模特身上，保持图2模特的脸、姿势、背景不变，只换${chatItem}。` + promptText });
                       }
-                      chatContent.push({ type: 'text', text: promptText });
                     } else {
                       chatContent.push({ type: 'text', text: promptText });
                       imageEditBase64List.forEach((b64) => {
@@ -1628,6 +1719,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                         const refLabels = Array.from({ length: imageEditFiles.length }, (_, i) => `参考图${i + 1}`).join('、');
                         promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                       }
+                      const colorSuffix = buildColorPreserveSuffix();
+                      if (colorSuffix) promptText = promptText + colorSuffix;
                       fd.append('prompt', promptText);
                     }
                     fd.append('model', String(variant.body.model || ''));
@@ -2120,6 +2213,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     const refLabels = Array.from({ length: imageEditFiles.length }, (_, k) => `参考图${k + 1}`).join('、');
                     promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                   }
+                  const colorSuffix = buildColorPreserveSuffix();
+                  if (colorSuffix) promptText = promptText + colorSuffix;
                   fd.append('prompt', promptText);
                 }
                 // 双槽 gpt-image 补齐同样加 input_fidelity=high 锁脸
@@ -2236,6 +2331,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       const refLabels = Array.from({ length: imageEditFiles.length }, (_, i) => `参考图${i + 1}`).join('、');
                       promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
                     }
+                    const colorSuffix = buildColorPreserveSuffix();
+                    if (colorSuffix) promptText = promptText + colorSuffix;
                     fd.append('prompt', promptText);
                   }
                   fd.append('model', String(variant.body.model || ''));
@@ -2406,7 +2503,60 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      const newResults = images.map((url: string, i: number) => ({
+      // 自动校色：检测泛红/偏色并自动校正白平衡（生成后后处理）
+      const autoCorrectImage = async (url: string): Promise<string> => {
+        if (!task.autoCorrectColor) return url;
+        try {
+          const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const im = new Image();
+            im.onload = () => resolve(im);
+            im.onerror = reject;
+            im.src = url;
+          });
+          const canvas = document.createElement('canvas');
+          const maxW = 1024;
+          const scale = Math.min(1, maxW / img.width);
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return url;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const pixels = data.data;
+          // 采样计算平均 R/G/B
+          let sumR = 0, sumG = 0, sumB = 0, count = 0;
+          for (let i = 0; i < pixels.length; i += 40) {
+            sumR += pixels[i]; sumG += pixels[i + 1]; sumB += pixels[i + 2]; count++;
+          }
+          const avgR = sumR / count, avgG = sumG / count, avgB = sumB / count;
+          const neutral = (avgG + avgB) / 2;
+          const redShift = avgR - neutral;
+          if (redShift > 8) {
+            // 泛红：将 R 通道拉回接近中性
+            const factor = neutral / avgR;
+            for (let i = 0; i < pixels.length; i += 4) {
+              pixels[i] = Math.min(255, pixels[i] * factor);
+            }
+            ctx.putImageData(data, 0, 0);
+            // eslint-disable-next-line no-console
+            logger.info(`${debugPrefix} 🎨 自动校色：检测到泛红(偏移${redShift.toFixed(1)})，已校正白平衡`);
+            return await new Promise<string>((resolve) => {
+              canvas.toBlob((blob) => {
+                if (blob) resolve(URL.createObjectURL(blob)); else resolve(url);
+              }, 'image/jpeg', 0.92);
+            });
+          }
+          return url;
+        } catch {
+          return url;
+        }
+      };
+
+      const processedImages = task.autoCorrectColor
+        ? await Promise.all(images.map((url) => autoCorrectImage(url)))
+        : images;
+
+      const newResults = processedImages.map((url: string, i: number) => ({
         id: `r_${Date.now()}_${i}`,
         url,
         model: task.model,

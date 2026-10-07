@@ -1,5 +1,31 @@
 import { useState, useMemo, useRef, useEffect, useCallback, memo } from 'react';
 import { toast } from 'sonner';
+
+// HSL 转 HEX
+function hslToHex(h: number, s: number, l: number): string {
+  s /= 100; l /= 100;
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const toHex = (x: number) => Math.round(255 * x).toString(16).padStart(2, '0');
+  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+}
+function hexToHsl(hex: string): [number, number, number] {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0; const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+  }
+  return [Math.round(h), Math.round(s * 100), Math.round(l * 100)];
+}
 import {
   Trash2,
   Play,
@@ -22,6 +48,7 @@ import {
    X,
    AlertCircle,
    Copy,
+   Palette,
  } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -73,6 +100,10 @@ const TaskPromptCell = memo(function TaskPromptCell({
 }: TaskPromptCellProps) {
   // 本地状态：输入时只更新本地，防抖或失焦时同步到全局，避免每次按键全表重渲染
   const [localPrompt, setLocalPrompt] = useState(task.prompt);
+  // 换装部位选择（款式上身功能专属）
+  const featureTpl = task.featureId ? getFeatureTemplate(task.featureId) : undefined;
+  const tryonTypes = featureTpl?.tryonTypes;
+  const currentTryonType = task.tryonType || 'clothes';
   const [optimizeInput, setOptimizeInput] = useState('');
   const [showOptimize, setShowOptimize] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
@@ -199,6 +230,143 @@ const TaskPromptCell = memo(function TaskPromptCell({
 
   return (
     <div className="space-y-2">
+      {tryonTypes && tryonTypes.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {tryonTypes.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => {
+                updateTask(task.id, { tryonType: t.id as ITask['tryonType'], prompt: t.prompt });
+                setLocalPrompt(t.prompt);
+              }}
+              className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                currentTryonType === t.id
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'bg-background text-muted-foreground border-border hover:bg-accent'
+              }`}
+            >
+              {t.icon} {t.label}
+            </button>
+          ))}
+          {/* 拼图展示开关（仅平铺生成功能显示） */}
+          {task.featureId === 'shoot-flat' && (
+            <button
+              onClick={() => {
+                const noGrid = '禁止拼图、禁止多格拼版、禁止九宫格，只输出一张独立的';
+                const useGrid = '用多格拼版方式展示多个角度/部位的特写，拼成一张展示图，';
+                const isGrid = localPrompt.includes('多格拼版方式展示');
+                const newPrompt = isGrid
+                  ? localPrompt.replace(useGrid, noGrid)
+                  : localPrompt.replace(noGrid, useGrid);
+                updateTask(task.id, { prompt: newPrompt });
+                setLocalPrompt(newPrompt);
+              }}
+              className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                localPrompt.includes('多格拼版方式展示')
+                  ? 'bg-amber-500 text-white border-amber-500'
+                  : 'bg-background text-muted-foreground border-border hover:bg-accent'
+              }`}
+            >
+              🧩 拼图展示
+            </button>
+          )}
+        </div>
+      )}
+      {/* 融合滤镜开关（仅AI换背景功能显示，不依赖tryonTypes） */}
+      {task.featureId === 'shoot-bg' && (
+        <div className="flex flex-wrap gap-1">
+          <button
+            onClick={() => {
+              const fuseMark = '【融合滤镜开启】人物的光影色调与图2背景氛围完全融合，整体色调统一自然';
+              const isFuse = localPrompt.includes('【融合滤镜开启】');
+              const newPrompt = isFuse
+                ? localPrompt.replace(/【融合滤镜开启】.*?整体色调统一自然[。.]?\s*/, '')
+                : localPrompt + ' ' + fuseMark;
+              updateTask(task.id, { prompt: newPrompt });
+              setLocalPrompt(newPrompt);
+            }}
+            className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+              localPrompt.includes('【融合滤镜开启】')
+                ? 'bg-blue-500 text-white border-blue-500'
+                : 'bg-background text-muted-foreground border-border hover:bg-accent'
+            }`}
+          >
+            🎨 融合滤镜
+          </button>
+          <button
+            onClick={() => {
+              const lightMark = '【融合光影开启】人物的光影方向、阴影位置、亮度、色温与图2背景环境完全匹配，人物脚下投下与图2光源方向一致的自然阴影';
+              const isLight = localPrompt.includes('【融合光影开启】');
+              const newPrompt = isLight
+                ? localPrompt.replace(/【融合光影开启】.*?自然阴影[。.]?\s*/, '')
+                : localPrompt + ' ' + lightMark;
+              updateTask(task.id, { prompt: newPrompt });
+              setLocalPrompt(newPrompt);
+            }}
+            className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+              localPrompt.includes('【融合光影开启】')
+                ? 'bg-amber-500 text-white border-amber-500'
+                : 'bg-background text-muted-foreground border-border hover:bg-accent'
+            }`}
+          >
+            💡 融合光影
+          </button>
+          <button
+            onClick={() => {
+              const sitMark = '【坐姿】让图1人物改成坐姿，坐在图2背景中的合适位置，姿势自然放松';
+              const isSit = localPrompt.includes('【坐姿】');
+              const newPrompt = isSit
+                ? localPrompt.replace(/【坐姿】.*?自然放松[。.]?\s*/, '')
+                : localPrompt + ' ' + sitMark;
+              updateTask(task.id, { prompt: newPrompt });
+              setLocalPrompt(newPrompt);
+            }}
+            className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+              localPrompt.includes('【坐姿】')
+                ? 'bg-green-500 text-white border-green-500'
+                : 'bg-background text-muted-foreground border-border hover:bg-accent'
+            }`}
+          >
+            🪑 坐姿
+          </button>
+          <button
+            onClick={() => {
+              const leanMark = '【靠墙】让图1人物自然靠在图2背景的墙面/柱子上，姿势自然';
+              const isLean = localPrompt.includes('【靠墙】');
+              const newPrompt = isLean
+                ? localPrompt.replace(/【靠墙】.*?姿势自然[。.]?\s*/, '')
+                : localPrompt + ' ' + leanMark;
+              updateTask(task.id, { prompt: newPrompt });
+              setLocalPrompt(newPrompt);
+            }}
+            className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+              localPrompt.includes('【靠墙】')
+                ? 'bg-green-500 text-white border-green-500'
+                : 'bg-background text-muted-foreground border-border hover:bg-accent'
+            }`}
+          >
+            🧱 靠墙
+          </button>
+          <button
+            onClick={() => {
+              const poseMark = '【跟随图2姿势】让图1人物的姿势/动作/身体形状参考图2人物的姿态，但保持图1人物的脸和服装不变';
+              const isPose = localPrompt.includes('【跟随图2姿势】');
+              const newPrompt = isPose
+                ? localPrompt.replace(/【跟随图2姿势】.*?脸和服装不变[。.]?\s*/, '')
+                : localPrompt + ' ' + poseMark;
+              updateTask(task.id, { prompt: newPrompt });
+              setLocalPrompt(newPrompt);
+            }}
+            className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+              localPrompt.includes('【跟随图2姿势】')
+                ? 'bg-purple-500 text-white border-purple-500'
+                : 'bg-background text-muted-foreground border-border hover:bg-accent'
+            }`}
+          >
+            🕺 跟随图2姿势
+          </button>
+        </div>
+      )}
       <Textarea
         value={localPrompt}
         onChange={handleChange}
@@ -206,6 +374,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
         placeholder="输入完整提示词..."
         className="min-h-[80px] text-xs resize-none"
       />
+      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'shoot-flat' && task.featureId !== 'design-recolor' && (
       <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
@@ -291,6 +460,174 @@ const TaskPromptCell = memo(function TaskPromptCell({
           >
             + 输入一句话让AI自动扩写
           </button>
+        )}
+      </div>
+      )}
+      {/* 服装改色选色器 */}
+      {task.featureId === 'design-recolor' && (
+        <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
+          <div className="flex gap-1.5 items-center">
+            <input
+              type="color"
+              onChange={(e) => {
+                const hex = e.target.value;
+                const colorMark = `【选色】服装颜色改为${hex}`;
+                const newPrompt = localPrompt.includes('【选色】')
+                  ? localPrompt.replace(/【选色】服装颜色改为[^，。\n]*/, colorMark)
+                  : localPrompt + ' ' + colorMark;
+                updateTask(task.id, { prompt: newPrompt });
+                setLocalPrompt(newPrompt);
+              }}
+              className="w-8 h-8 rounded border border-border cursor-pointer"
+            />
+            <input
+              type="text"
+              placeholder="输入颜色代码如 #FF0000"
+              onBlur={(e) => {
+                const hex = e.target.value.trim();
+                if (!hex) return;
+                const colorMark = `【选色】服装颜色改为${hex}`;
+                const newPrompt = localPrompt.includes('【选色】')
+                  ? localPrompt.replace(/【选色】服装颜色改为[^，。\n]*/, colorMark)
+                  : localPrompt + ' ' + colorMark;
+                updateTask(task.id, { prompt: newPrompt });
+                setLocalPrompt(newPrompt);
+              }}
+              className="flex-1 h-7 text-xs border border-border rounded px-2"
+            />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              { name: '黑色', color: '#000000' },
+              { name: '白色', color: '#FFFFFF' },
+              { name: '大红色', color: '#E63946' },
+              { name: '粉色', color: '#F4A7C0' },
+              { name: '橙色', color: '#F4A261' },
+              { name: '鹅黄色', color: '#F1E15B' },
+              { name: '军绿色', color: '#556B2F' },
+              { name: '湖蓝色', color: '#457B9D' },
+              { name: '深蓝色', color: '#1D3557' },
+              { name: '紫色', color: '#9B5DE5' },
+              { name: '灰色', color: '#8D99AE' },
+              { name: '卡其色', color: '#C9B896' },
+            ].map((c) => (
+              <button
+                key={c.name}
+                onClick={() => {
+                  const colorMark = `【选色】服装颜色改为${c.name}（${c.color}）`;
+                  const newPrompt = localPrompt.includes('【选色】')
+                    ? localPrompt.replace(/【选色】服装颜色改为[^，。\n]*/, colorMark)
+                    : localPrompt + ' ' + colorMark;
+                  updateTask(task.id, { prompt: newPrompt });
+                  setLocalPrompt(newPrompt);
+                }}
+                title={`${c.name} ${c.color}`}
+                className="w-6 h-6 rounded border border-border hover:scale-110 transition-transform"
+                style={{ backgroundColor: c.color }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {/* 色彩保真控制（防偏色） */}
+      <div className="border border-primary/20 rounded-md p-2 bg-primary/5 space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] text-primary font-medium flex items-center gap-1">
+            <Palette className="size-3" /> 色彩保真（防偏色）
+          </span>
+          {task.colorLevel && (
+            <button
+              onClick={() => updateTask(task.id, { colorLevel: undefined, colorScope: undefined, colorIntensity: undefined })}
+              className="text-[10px] text-muted-foreground hover:text-destructive"
+            >
+              清除
+            </button>
+          )}
+        </div>
+        <div className="flex gap-1">
+          {([
+            { id: 'standard', label: '标准' },
+            { id: 'high', label: '高保真' },
+            { id: 'ultra', label: '极致还原' },
+          ] as const).map(opt => (
+            <button
+              key={opt.id}
+              onClick={() => updateTask(task.id, { colorLevel: task.colorLevel === opt.id ? undefined : opt.id })}
+              className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                task.colorLevel === opt.id
+                  ? 'bg-primary text-white border-primary'
+                  : 'bg-background text-muted-foreground border-border/60 hover:border-primary/40'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        {task.colorLevel && (
+          <>
+            <div className="flex flex-wrap gap-1">
+              {([
+                { id: 'clothes', label: '👕 服装原色' },
+                { id: 'skin', label: '🧑 肤色' },
+                { id: 'bg', label: '🏠 背景色' },
+                { id: 'light', label: '💡 色温' },
+                { id: 'wb', label: '⚪ 白平衡' },
+                { id: 'nored', label: '🚫 防泛红' },
+              ] as const).map(opt => {
+                const active = (task.colorScope || []).includes(opt.id);
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => {
+                      const cur = task.colorScope || [];
+                      const next = active ? cur.filter(x => x !== opt.id) : [...cur, opt.id];
+                      updateTask(task.id, { colorScope: next.length ? next : undefined });
+                    }}
+                    className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                      active
+                        ? 'bg-primary/20 text-primary border-primary/40'
+                        : 'bg-background text-muted-foreground border-border/60 hover:border-primary/40'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-muted-foreground whitespace-nowrap">强度</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={task.colorIntensity ?? 75}
+                onChange={(e) => updateTask(task.id, { colorIntensity: parseInt(e.target.value) })}
+                className="flex-1 h-1 accent-primary"
+              />
+              <span className="text-[10px] text-primary w-7 text-right">{task.colorIntensity ?? 75}%</span>
+            </div>
+            {/* 高级选项 */}
+            <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 border-t border-border/40">
+              <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer hover:text-foreground">
+                <input
+                  type="checkbox"
+                  checked={!!task.autoCorrectColor}
+                  onChange={(e) => updateTask(task.id, { autoCorrectColor: e.target.checked || undefined })}
+                  className="accent-primary"
+                />
+                生成后自动校色
+              </label>
+              <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer hover:text-foreground">
+                <input
+                  type="checkbox"
+                  checked={!!task.lockClothesHue}
+                  onChange={(e) => updateTask(task.id, { lockClothesHue: e.target.checked || undefined })}
+                  className="accent-primary"
+                />
+                锁定服装色相对比原图
+              </label>
+            </div>
+          </>
         )}
       </div>
     </div>

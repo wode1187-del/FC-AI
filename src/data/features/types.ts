@@ -41,4 +41,6 @@ export interface IFeatureTemplate {
   referenceSlots?: { id: string; label: string; icon: string; hint: string }[];
   /** 底层实现流程说明（展示给用户） */
   steps: string[];
+  /** 换装部位类型（款式上身专属）：每个部位对应不同提示词 */
+  tryonTypes?: { id: string; label: string; icon: string; prompt: string }[];
 }

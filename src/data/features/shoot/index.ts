@@ -13,4 +13,4 @@ import { shootPose } from './shoot-pose';
 import { shootBg } from './shoot-bg';
 import { shootLogo } from './shoot-logo';
 
-export const SHOOT_TEMPLATES: IFeatureTemplate[] = [shootTryon, shootDetail, shootSet, shootMix, shootFlat, shootModelSwap, shootFaceSwap, shootShoes, shootIron, shoot3d, shootPose, shootBg, shootLogo];
+export const SHOOT_TEMPLATES: IFeatureTemplate[] = [shootTryon, shootFlat, shootIron, shoot3d, shootModelSwap, shootBg, shootLogo, shootSet, shootMix, shootFaceSwap, shootShoes, shootDetail, shootPose];

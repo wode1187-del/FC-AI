@@ -68,6 +68,18 @@ export interface ITask {
   startedAt?: number;
   completedAt?: number;
   durationMs?: number;
+  /** 色彩保真等级：standard=标准 high=高保真 ultra=极致还原 */
+  colorLevel?: 'standard' | 'high' | 'ultra';
+  /** 色彩控制范围：clothes=服装 skin=肤色 bg=背景 light=色温 wb=白平衡 */
+  colorScope?: string[];
+  /** 色彩保真强度 0-100 */
+  colorIntensity?: number;
+  /** 生成后自动校色（后处理） */
+  autoCorrectColor?: boolean;
+  /** 锁定服装色相对比原图 */
+  lockClothesHue?: boolean;
+  /** 换装类型：clothes=衣服 pants=裤子 inner=内搭 skirt=裙子 accessory=配饰 */
+  tryonType?: 'clothes' | 'pants' | 'inner' | 'skirt' | 'accessory';
 }
 
 // API 配置
