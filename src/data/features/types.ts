@@ -43,4 +43,8 @@ export interface IFeatureTemplate {
   steps: string[];
   /** 换装部位类型（款式上身专属）：每个部位对应不同提示词 */
   tryonTypes?: { id: string; label: string; icon: string; prompt: string }[];
+  /** 自由改款快捷选项（可多选组合）：每个维度可选改法，点击后拼入提示词；multiple=true 时该维度可叠加多个 */
+  modifyOptions?: { group: string; multiple?: boolean; options: { value: string; label: string }[] }[];
+  /** 自由改款设计稿排版选项：布局单选、模块可多选，点击后拼入【排版】段提示词 */
+  layoutOptions?: { group: string; multiple?: boolean; options: { value: string; label: string }[] }[];
 }

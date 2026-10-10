@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { scopedStorage, logger } from '@lark-apaas/client-toolkit-lite';
 import { toast } from 'sonner';
+import { removeBackgroundLocal } from '@/lib/removeBg';
 import type { IProject, ITask, IApiConfig, IModel, IPreset, ITextOptimizeConfig, IGenerateResult } from '@/data/models';
 import { getFeatureTemplate, isVideoModel, VIDEO_MODELS } from '@/data/featureTemplates';
 import type { IFeatureTemplate } from '@/data/featureTemplates';
@@ -559,7 +560,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const supportsBatch = modelLower.includes('gpt-image'); // 仅 gpt-image 系列官方支持 n>1
     const actualRequestedCount = supportsBatch ? (append ? appendCount : (task.imageCount || 1)) : 1;
     const requestedCount = actualRequestedCount;
-    const totalImageCount = supportsBatch ? (append ? task.results.length + appendCount : (task.imageCount || 1)) : (append ? task.results.length + 1 : 1);
+    // 移除背景（本地 RMBG 逐张抠图）：占位张数按参考图数量显示，而非 imageCount
+    const isLocalRemoveBg = task.featureId === 'design-remove-bg';
+    const totalImageCount = isLocalRemoveBg
+      ? (task.referenceImages?.length || 1)
+      : (supportsBatch ? (append ? task.results.length + appendCount : (task.imageCount || 1)) : (append ? task.results.length + 1 : 1));
 
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'generating', imageCount: totalImageCount, errorMsg: undefined, startedAt: Date.now(), completedAt: undefined, durationMs: undefined } : t));
 
@@ -599,6 +604,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     let lastError: string | null = null;
     let lastFullError: string | null = null;
     let apiConfig: IApiConfig | null = null;
+
+    // ===== 移除背景：本地 RMBG 抠图（不上 API、不扣费、不重绘、不偏色） =====
+    if (task.featureId === 'design-remove-bg' && task.referenceImages && task.referenceImages.length > 0) {
+      const refs = task.referenceImages;
+      // eslint-disable-next-line no-console
+      logger.info(`${debugPrefix} 🖼️ 移除背景：走本地 RMBG 抠图（不调 API、不扣费），共 ${refs.length} 张参考图`);
+      try {
+        toast.info('本地 RMBG 抠图中（首次约176MB模型加载，之后缓存秒开）…');
+        // 逐张抠图（顺序执行，避免 worker 并发冲突），每张参考图输出一张透明 PNG
+        const localList = [];
+        for (const ref of refs) {
+          // eslint-disable-next-line no-console
+          logger.info(`${debugPrefix}   🖼️ 抠图 ${ref.name || '参考图'}…`);
+          const local = await removeBackgroundLocal(ref.url);
+          localList.push(local);
+          // eslint-disable-next-line no-console
+          logger.info(`${debugPrefix}   ✅ ${local.width}×${local.height}`);
+        }
+        const newResults = localList.map((local, i) => ({
+          id: `r_${Date.now()}_${i}`,
+          url: local.url,
+          model: task.model,
+          prompt: task.prompt,
+          createdAt: Date.now(),
+          width: local.width,
+          height: local.height,
+        }));
+        setTasks(prev => prev.map(t => t.id === taskId ? {
+          ...t,
+          status: 'completed',
+          results: newResults,
+          errorMsg: undefined,
+          completedAt: Date.now(),
+          durationMs: Date.now() - generateStartTime,
+        } : t));
+        // eslint-disable-next-line no-console
+        logger.info(`${debugPrefix} ✅ 本地 RMBG 抠图完成，共 ${localList.length} 张透明PNG`);
+        return;
+      } catch (localErr) {
+        // eslint-disable-next-line no-console
+        logger.error(`${debugPrefix} ⚠️ 本地 RMBG 抠图失败，回退到 API 生成：${String(localErr)}`);
+        toast.error('本地抠图失败，已回退到 API 生成');
+        // 不 return，继续走下方正常 API 流程
+      }
+    }
 
     try {
       // 找到对应 API 配置
@@ -645,18 +695,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // eslint-disable-next-line no-console
       logger.info(`${debugPrefix} 是否自适应尺寸:`, String(isAutoSize));
 
+      const presetKey = matchModelPresetKey(task.model);
+      const isGoogleModel = presetKey?.startsWith('nano-banana') || presetKey?.startsWith('gemini');
+      // Inpaint 局部重绘模型（FLUX Kontext / MJ inpaint）：官方 edits 只认 image+mask+prompt，
+      // 不传 n / size / response_format / negative_prompt / strength，避免服务器拒绝或断连
+      const isInpaintModel = presetKey === 'flux-kontext' || presetKey === 'mj-inpaint';
+
       // 构造请求体（OpenAI 兼容格式）
       const body: Record<string, unknown> = {
         model: realModelId,
         prompt: task.prompt,
-        n: append ? appendCount : (task.imageCount || 1),
       };
-
-      const presetKey = matchModelPresetKey(task.model);
-      const isGoogleModel = presetKey?.startsWith('nano-banana') || presetKey?.startsWith('gemini');
+      // inpaint 模型不传 n（官方固定单张）；其他模型按需传 n
+      if (!isInpaintModel) {
+        body.n = append ? appendCount : (task.imageCount || 1);
+      }
 
       // 自适应尺寸不传 size；Google Gemini/Nano Banana 官方用 image_size+aspect_ratio，不用 size
-      if (!isAutoSize && !isGoogleModel) {
+      if (!isAutoSize && !isGoogleModel && !isInpaintModel) {
         if (presetKey?.startsWith('wan')) {
           // Wan 2.7 官方推荐缩写档位 1K/2K/4K（T2I 可 4K，I2I 最高 2K）
           const wm = task.ratio.match(/^(\d+(?:\.\d+)?K)/);
@@ -724,13 +780,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
 
       // 负向提示词（gpt-image 系列官方不支持 negative_prompt，跳过）
-      if (task.negativePrompt?.trim() && !presetKey?.startsWith('gpt-image')) {
+      if (task.negativePrompt?.trim() && !presetKey?.startsWith('gpt-image') && !isInpaintModel) {
         body.negative_prompt = task.negativePrompt;
       }
 
       // response_format：gpt-image 系列不支持此参数且总是返回 base64，故跳过；
+      // inpaint 模型官方 edits 不接受 response_format，跳过；
       // 其他 API 设为 url（大多数 API 默认就是 url，显式指定增强兼容性）
-      if (presetKey !== 'gpt-image-2' && presetKey !== 'gpt-image-2.5-flare' && presetKey !== 'gpt-image-2.5-sunburst') {
+      if (presetKey !== 'gpt-image-2' && presetKey !== 'gpt-image-2.5-flare' && presetKey !== 'gpt-image-2.5-sunburst' && !isInpaintModel) {
         body.response_format = 'url';
       }
 
@@ -838,6 +895,48 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return maskFileCache;
       };
 
+      // 用户蒙版 dataURL(base64 PNG，白=重绘) -> File
+      const maskDataUrlToFile = async (dataUrl: string): Promise<File> => {
+        const mime = dataUrl.split(';')[0].split(':')[1] || 'image/png';
+        const b64 = dataUrl.split(',')[1];
+        const byteStr = atob(b64);
+        const bytes = new Uint8Array(byteStr.length);
+        for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+        return new File([bytes], 'user-mask.png', { type: mime });
+      };
+
+      // 读取图片文件的原始宽高
+      const getImageNaturalSize = (file: File): Promise<{ width: number; height: number }> => {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+          img.onerror = () => reject(new Error('图片尺寸读取失败'));
+          img.src = URL.createObjectURL(file);
+        });
+      };
+
+      // 把蒙版缩放为指定尺寸（保持 mask 与 image 严格同尺寸，inpaint 模型必需）
+      const resizeMaskFile = async (file: File, width: number, height: number): Promise<File> => {
+        const img = new Image();
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('蒙版图片加载失败'));
+          img.src = URL.createObjectURL(file);
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return file;
+        ctx.drawImage(img, 0, 0, width, height);
+        return await new Promise<File>((resolve) => {
+          canvas.toBlob(
+            (blob) => resolve(new File([blob!], 'user-mask.png', { type: 'image/png' })),
+            'image/png',
+          );
+        });
+      };
+
       // 参考图 URL 转 Blob 工具函数
       const imageUrlToBlob = async (url: string, name: string): Promise<File> => {
         // eslint-disable-next-line no-console
@@ -869,8 +968,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // 该顺序与界面槽位（上传款式→上传模特）及用户手输提示词的"图1衣服、图2模特"一致，
           // 也与系统追加的结构化角色前缀编号对齐，避免编号错位导致换衣混乱。
           const slotOrder = (slot?: string) => {
-            if (slot === 'style' || slot === 'base') return 0;  // 底图/衣服=图1
-            if (slot === 'model' || slot === 'face') return 1;  // 模特/人脸=图2
+            if (slot === 'style' || slot === 'base' || slot === 'fabric') return 0;  // 底图/衣服/面料=图1
+            if (slot === 'model' || slot === 'face' || slot === 'fabric-style') return 1;  // 模特/人脸/款式底图=图2
             return 2;
           };
           const sortedRefs = [...refs].sort((a, b) => slotOrder(a.slot) - slotOrder(b.slot));
@@ -896,8 +995,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const isBaseFace = slotList.includes('base') && slotList.includes('face');
           const isBaseBg = slotList.includes('base') && slotList.includes('bg');
           const isBaseColor = slotList.includes('base') && slotList.includes('color');
+          const isFabric = slotList.includes('fabric') && slotList.includes('fabric-style');
           isDualSlotTryon = isImageEditMode &&
-            (isStyleModel || isBaseFace || isBaseBg || isBaseColor) &&
+            (isStyleModel || isBaseFace || isBaseBg || isBaseColor || isFabric) &&
             imageEditBase64List.length >= 2;
           isFaceSwap = isBaseFace && !isStyleModel;
           isBgSwap = isBaseBg && !isStyleModel && !isBaseFace;
@@ -931,6 +1031,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 return `[<IMAGE_0>=原图（含人物/商品），<IMAGE_1>=背景图。严格保持 <IMAGE_0> 主体（面部、发型、肤色、服装、姿势）每个像素不变，不得调色不得重绘；仅将背景替换为 <IMAGE_1> 的场景，主体边缘自然融合。]\n\n用户提示词：`;
               }
               return `[参考图1=原图（含人物/商品），参考图2=背景图。严格保持参考图1主体（面部、五官、发型、肤色、服装颜色/图案/材质、姿势、手部、配饰）每一个像素完全不变，不得调色、不得重绘、不得改变任何细节和颜色；仅将参考图1的背景替换为参考图2的背景场景。主体与新背景之间边缘自然融合，主体本身的颜色和光影必须与参考图1完全一致，不得因新背景而偏色。]\n\n用户提示词：`;
+            }
+            // 服装改色场景：图1=原图，图2=色图（或无图2仅用颜色代码）
+            if (isBaseColor) {
+              return `[参考图1=原图（含人物和服装）。严格保持参考图1中除服装颜色外的每一个像素完全不变：人物面部、五官、发型、肤色、姿势、手部、配饰、背景、灯光、阴影全部原样保留，不得重绘、不得调色、不得变形。唯一允许修改的区域：服装本身的颜色——只改衣服的颜色，衣服的款式、版型、面料纹理、图案、褶皱、光影全部与参考图1一致。如果有参考图2，只取参考图2的颜色值，不要参考图2的款式和人物。]\n\n用户提示词：`;
+            }
+            // 面料上身场景：图1=面料/图案，图2=款式底图；按部位细分（full/top/bottom/inner）
+            if (isFabric) {
+              const fType = task.tryonType || 'full';
+              const fMap: Record<string, string> = {
+                full: '将参考图1中的面料纹理、图案、印花完整应用到参考图2服装的整件服装表面，只替换服装的面料/图案，服装的款式、版型、结构、轮廓、尺寸完全不变',
+                top: '只将参考图1中的面料纹理、图案、印花应用到参考图2模特的上装（上身衣服）表面，上装的版型、结构、轮廓完全不变，下装、人体、场景背景、灯光等其余部分完全保持参考图2原样',
+                bottom: '只将参考图1中的面料纹理、图案、印花应用到参考图2模特的下装（裤子/裙子）表面，下装的版型、裤长/裙长完全不变，上装、人体、场景背景、灯光等其余部分完全保持参考图2原样',
+                inner: '只将参考图1中的面料纹理、图案、印花应用到参考图2模特的内搭衣服表面，内搭的版型、结构、轮廓完全不变，外套、下装、人体、场景背景、灯光等其余部分完全保持参考图2原样',
+              };
+              const fAction = fMap[fType] || fMap.full;
+              if (dualIsGrok) {
+                return `[<IMAGE_0>=面料/图案图，<IMAGE_1>=服装款式底图（模特穿着图）。以 <IMAGE_1> 为底图，严格保持其服装的款式、版型、结构、轮廓、尺寸以及人体、背景完全不变，${fAction}，面料贴合版型自然垂坠，褶皱处图案跟随变形自然，无生硬贴图感。]\n\n用户提示词：`;
+              }
+              return `[参考图1=面料/图案图，参考图2=服装款式底图（模特穿着图）。以参考图2为底图，严格保持参考图2服装的款式、版型、结构、轮廓、尺寸以及人体、背景完全不变，${fAction}，面料贴合版型自然垂坠，褶皱处图案跟随变形自然，无缝衔接，无生硬贴图感，商业设计预览质感。]\n\n用户提示词：`;
             }
             // 款式上身场景：根据换装类型调整描述
             const tryonType = task.tryonType || 'clothes';
@@ -1524,12 +1643,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   });
                 } else {
                   // 普通图生图：只保留 field=image 一种方案，避免多变体探测扣费
+                  // 服装改色且启用了用户蒙版：携带真实蒙版做区域重绘
+                  const hasUserMask = task.featureId === 'design-recolor' && task.maskEnabled && task.maskDataUrl;
                   attempts.push({
-                    label: 'edits 基础 · field=image',
+                    label: hasUserMask ? 'edits 基础 · field=image（带用户蒙版）' : 'edits 基础 · field=image',
                     mode: 'edits',
                     format: 'formdata',
                     fieldName: 'image',
-                    extraParams: {},
+                    extraParams: hasUserMask ? { __useMask: 'true' } : {},
                   });
                 }
               } else if (isVarEndpoint) {
@@ -1690,17 +1811,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       logger.info(`${debugPrefix}     [${i}] ${k} = ${vInfo}`);
                     });
 
-                    // edits 端点加 mask（全透明，等于"编辑整张图"）
+                    // edits 端点加 mask：有用户蒙版则用真实蒙版（白=重绘），否则全透明（编辑整张图）
                     if (attempt.extraParams.__useMask === 'true') {
-                      const mask = await getMaskFile();
-                      fd.append('mask', mask, mask.name);
+                      if (task.maskEnabled && task.maskDataUrl && task.featureId === 'design-recolor') {
+                        // 用户涂抹的真实蒙版：base64 dataURL -> File
+                        try {
+                          // inpaint 模型要求 mask 与 image 严格同尺寸，需把用户蒙版缩放到压缩后 image 的尺寸
+                          let maskFile = await maskDataUrlToFile(task.maskDataUrl);
+                          if (isInpaintModel && imageEditFiles.length > 0) {
+                            try {
+                              const target = await getImageNaturalSize(imageEditFiles[0]);
+                              maskFile = await resizeMaskFile(maskFile, target.width, target.height);
+                            } catch (e) {
+                              logger.warn(`${debugPrefix}   ⚠️ 蒙版缩放失败，使用原始蒙版:`, String(e));
+                            }
+                          }
+                          fd.append('mask', maskFile, maskFile.name);
+                        } catch (e) {
+                          logger.warn(`${debugPrefix}   ⚠️ 用户蒙版解析失败，回退全透明mask:`, String(e));
+                          const mask = await getMaskFile();
+                          fd.append('mask', mask, mask.name);
+                        }
+                      } else {
+                        const mask = await getMaskFile();
+                        fd.append('mask', mask, mask.name);
+                      }
                     }
 
                     // 图生图关键参数：mode + image_weight（只有attempt明确要求时才添加）
                     if (isGenEndpoint && attempt.extraParams.mode) {
                       fd.append('mode', attempt.extraParams.mode);
                       fd.append('image_weight', attempt.extraParams.image_weight || strength);
-                    } else if (isEditEndpoint) {
+                    } else if (isEditEndpoint && !modelLower.includes('gpt-image') && !isInpaintModel) {
                       fd.append('strength', strength);
                     }
                     // 双槽 gpt-image：input_fidelity=high 锁定模特五官/身份，避免重新生成新脸
@@ -1781,7 +1923,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     if (isGenEndpoint && attempt.extraParams.mode) {
                       jsonBody.mode = attempt.extraParams.mode;
                       jsonBody.image_weight = attempt.extraParams.image_weight || strength;
-                    } else if (isEditEndpoint) {
+                    } else if (isEditEndpoint && !modelLower.includes('gpt-image')) {
                       jsonBody.strength = strength;
                     }
                     requestHeaders['Content-Type'] = 'application/json';
@@ -1862,10 +2004,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   logger.warn(`${debugPrefix}   ⚠️ 请求异常:`, String(fetchErr));
                   const fetchMsg = String(fetchErr instanceof Error ? fetchErr.message : fetchErr);
                   const isAbort = fetchErr instanceof Error && fetchErr.name === 'AbortError';
+                  // 网络级失败（连接被关闭/CORS/跨域/Failed to fetch/ERR_CONNECTION_CLOSED等）：
+                  // 请求可能已到达服务器并计费，继续尝试下一个方案只会重复扣费且同样被拦截，立即中止
+                  const isNetworkError =
+                    fetchErr instanceof TypeError ||
+                    /failed to fetch|networkerror|load failed|cors|network|err_connection/i.test(fetchMsg);
                   lastError = fetchMsg;
-                  // 超时直接停止，不再尝试下一种策略，避免等待太久
-                  if (isAbort) {
-                         throw fetchErr;
+                  // 超时 / 网络错误：直接终止，不再尝试下一种策略，避免重复计费
+                  if (isAbort || isNetworkError) {
+                    throw fetchErr;
                   }
                   if (ai === attempts.length - 1) {
                     throw fetchErr;
@@ -1893,6 +2040,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     // eslint-disable-next-line no-console
                     logger.info(`${debugPrefix}   ⚠️ 缓存策略失败，累计: ${failCount}/3`);
                   }
+                }
+
+                // 内容安全策略拒绝（HTTP 451 / content safety / safety policy）等"重试必再被拒"的错误：
+                // 内容未变，降级变体/换端点照样被拒，且每次请求都会计费 → 立即终止所有变体与端点，避免重复扣费
+                if (
+                  lastError &&
+                  (lastError.includes('451') ||
+                    /content safety|safety policy|rejected by the content/i.test(lastError))
+                ) {
+                  triedEndpoints = endpoints.length + 1;
+                  throw new Error(lastError);
                 }
 
                 if (vi < bodyVariants.length - 1) continue;
@@ -1978,6 +2136,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               logger.warn(`${debugPrefix}   ❌ 请求失败:`, String(lastError));
               // eslint-disable-next-line no-console
               logger.warn(`${debugPrefix}   完整错误响应:`, String(responseText));
+
+              // 内容安全策略拒绝（HTTP 451 / content safety / safety policy）等"重试必再被拒"的错误：
+              // 内容未变，降级变体/换端点照样被拒，且每次请求都会计费 → 立即终止所有变体与端点，避免重复扣费
+              const errMsgLower = errMsg.toLowerCase();
+              if (
+                res.status === 451 ||
+                errMsgLower.includes('content safety') ||
+                errMsgLower.includes('safety policy') ||
+                errMsgLower.includes('rejected by the content')
+              ) {
+                lastError = `HTTP ${res.status}${errInfo.code ? ` [${errInfo.code}]` : ''}: ${errMsg}`;
+                lastFullError = responseText;
+                triedEndpoints = endpoints.length + 1;  // 终止所有端点重试
+                break;  // 跳出变体循环，不再降级
+              }
 
               // 如果是 invalid_request 类错误，且还有下一个变体，继续降级尝试
               if (isInvalidRequestError(res.status, errInfo) && vi < bodyVariants.length - 1) {
@@ -2100,11 +2273,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             ) {
               lastError = '网络错误/CORS跨域限制：浏览器无法直接请求该API。请检查API地址是否正确，或使用代理/在服务端转发请求，或配置API服务端允许跨域(CORS)。';
               lastFullError = errMsg;
-              break; // CORS 错误不用试变体了，直接跳下一个 endpoint
+              // 网络/CORS 失败：请求可能已到达服务器并计费，继续尝试其他端点只会重复扣费，
+              // 立即终止所有端点/变体重试（triedEndpoints 置顶让外层 endpoint 循环结束）
+              triedEndpoints = endpoints.length + 1;
+              break; // CORS 错误不用试变体了，且不再尝试其他端点
             }
 
             // 如果是 HTTP 开头的错误（我们自己 throw 的），继续降级或换下一个 endpoint
             if (e instanceof Error && e.message.startsWith('HTTP')) {
+              // 内容安全策略拒绝（451）等：重试其他端点必再被拒且重复计费，终止所有端点
+              if (e.message.includes('451') || /content safety|safety policy|rejected by the content/i.test(e.message)) {
+                triedEndpoints = endpoints.length + 1;
+                break;
+              }
               // 这里是从 if (!res.ok) 分支 throw 出来的，已经处理过了
               // 如果还有下一个 endpoint，让外层继续
               break;
@@ -2419,7 +2600,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 if (fetchMsg.includes('Failed to fetch') || fetchMsg.includes('CORS') || fetchMsg.includes('NetworkError') || fetchMsg.includes('Load failed')) {
                   lastError = '网络错误/CORS跨域限制：浏览器无法直接请求该API。请检查API地址是否正确，或使用代理/在服务端转发请求，或配置API服务端允许跨域(CORS)。';
                   lastFullError = fetchMsg;
-                  break; // CORS 跳出 endpoint 循环
+                  // 网络/CORS 失败：请求可能已计费，终止所有端点/变体重试，避免重复扣费
+                  if (typeof triedEndpoints === 'number') triedEndpoints = endpoints.length + 1;
+                  break; // CORS 跳出变体循环，且不再尝试其他端点
                 }
               }
             }
@@ -2670,8 +2853,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
     if (MODEL_RESOLUTIONS[lower]) return lower;
     // 模糊匹配 —— 更具体的放前面
-    if (lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5.0pro') || lower.includes('seedream-5-pro')) return 'seedream-5.0-pro';
-    if (lower.includes('seedream-5.0-lite') || lower.includes('seedream-5-lite') || lower.includes('seedream5.0lite')) return 'seedream-5.0-lite';
+    if (lower.includes('seedream-v5-pro') || lower.includes('seedream-v5-flash') || lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5-pro')) return 'seedream-5.0-pro';
+    if (lower.includes('seedream-v5-lite') || lower.includes('seedream-5.0-lite') || lower.includes('seedream-5-lite') || lower.includes('seedream5-lite')) return 'seedream-5.0-lite';
     if (lower.includes('seedream')) return 'seedream-5.0-lite';
     if (lower.includes('qwen-image-3') || lower.includes('qwen-image3') || lower.includes('qwen-image-3.0')) return 'qwen-image-3';
     if (lower.includes('qwen-image')) return 'qwen-image-3';
@@ -2687,8 +2870,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (lower.includes('gpt-image')) return 'gpt-image-2';
     if (lower.includes('jimeng') || lower.includes('ji-meng') || lower.includes('即梦')) return 'jimeng-5.0';
     if (lower.includes('flux-1.1-pro') || lower.includes('flux-1-1-pro') || lower.includes('flux1.1pro')) return 'flux-1.1-pro';
+    // FLUX.2 新一代（flux-2-* / flux2-*），分辨率更高，须在 flux-1-dev 前匹配
+    if (lower.includes('flux-2-') || lower.includes('flux-2.') || lower.includes('flux2') || lower.includes('flux-2')) return 'flux-2';
     if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
     if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
+    // Inpaint 局部重绘模型（支持蒙版）
+    if (lower.includes('flux-kontext') || lower.includes('flux-context') || lower.includes('kontext') || lower.includes('context')) return 'flux-kontext';
+    if (lower.includes('inpaint')) return 'mj-inpaint';
     if (lower.includes('flux')) return 'flux-1.1-pro';
     // Wan 2.7 系列
     if (lower.includes('wan-2.7-global-i2i-pro') || lower.includes('wan2.7-i2i-pro')) return 'wan-2.7-global-i2i-pro';
@@ -2794,8 +2982,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const lower = `${modelId} ${modelName}`.toLowerCase().replace(/_/g, '-');
     if (MODEL_RESOLUTIONS[modelId]) return modelId;
     // 更具体的放前面
-    if (lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5.0pro')) return 'seedream-5.0-pro';
-    if (lower.includes('seedream-5.0-lite') || lower.includes('seedream-5-lite') || lower.includes('seedream5.0lite')) return 'seedream-5.0-lite';
+    if (lower.includes('seedream-v5-pro') || lower.includes('seedream-v5-flash') || lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5-pro')) return 'seedream-5.0-pro';
+    if (lower.includes('seedream-v5-lite') || lower.includes('seedream-5.0-lite') || lower.includes('seedream-5-lite') || lower.includes('seedream5-lite')) return 'seedream-5.0-lite';
     if (lower.includes('seedream')) return 'seedream-5.0-lite';
     if (lower.includes('qwen-image-3') || lower.includes('qwen-image3') || lower.includes('qwen-image-3.0')) return 'qwen-image-3';
     if (lower.includes('qwen-image')) return 'qwen-image-3';
@@ -2806,8 +2994,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (lower.includes('gpt-image')) return 'gpt-image-2';
     if (lower.includes('jimeng') || lower.includes('ji-meng') || lower.includes('即梦')) return 'jimeng-5.0';
     if (lower.includes('flux-1-1-pro') || lower.includes('flux-1.1-pro') || lower.includes('flux1.1pro')) return 'flux-1.1-pro';
+    // FLUX.2 新一代（flux-2-* / flux2-*），分辨率更高，须在 flux-1-dev 前匹配
+    if (lower.includes('flux-2-') || lower.includes('flux-2.') || lower.includes('flux2') || lower.includes('flux-2')) return 'flux-2';
     if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
     if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
+    // Inpaint 局部重绘模型（支持蒙版）
+    if (lower.includes('flux-kontext') || lower.includes('flux-context') || lower.includes('kontext') || lower.includes('context')) return 'flux-kontext';
+    if (lower.includes('inpaint')) return 'mj-inpaint';
     if (lower.includes('flux')) return 'flux-1.1-pro';
     return 'flux-1.1-pro';
   }
@@ -3111,8 +3304,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
 
     const isSecondary = config.isSecondary || id === 'api-custom-2';
-    const suffix = isSecondary ? ' · API 2' : '';
-    const sourceLabel = isSecondary ? '自定义兼容接口 · API 2' : config.label;
+    const apiNumMatch = /^api-custom-(\d+)$/.exec(id);
+    const apiNum = apiNumMatch ? apiNumMatch[1] : '2';
+    const suffix = isSecondary ? ` · API ${apiNum}` : '';
+    const sourceLabel = isSecondary ? `自定义兼容接口 · API ${apiNum}` : config.label;
 
     // 视频 API（可灵 / 即梦）：轻量连通性验证
     if (config.type === 'kling' || config.type === 'seedance') {
@@ -3187,8 +3382,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const config = apiConfigs.find(c => c.id === apiId);
     if (!config) return;
     const isSecondary = config.isSecondary || apiId === 'api-custom-2';
-    const suffix = isSecondary ? ' · API 2' : '';
-    const sourceLabel = isSecondary ? '自定义兼容接口 · API 2' : config.label;
+    const apiNumMatch = /^api-custom-(\d+)$/.exec(apiId);
+    const apiNum = apiNumMatch ? apiNumMatch[1] : '2';
+    const suffix = isSecondary ? ` · API ${apiNum}` : '';
+    const sourceLabel = isSecondary ? `自定义兼容接口 · API ${apiNum}` : config.label;
     const displayName = (modelName || modelId) + suffix;
     const fullId = `${apiId}_${modelId}`;
 

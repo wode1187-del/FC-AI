@@ -7,11 +7,115 @@ export const designModify: IFeatureTemplate = {
     icon: '✂️',
     category: 'design',
     mode: 'img2img',
-    prompt: '在保持服装整体风格与结构的基础上，对款式进行局部改款设计：调整领型、袖型、下摆、长度、版型松紧等，改款后服装细节精致、可生产落地，正面展示，干净白底，设计稿质感。',
-    negativePrompt: '结构混乱、变形、文字、水印、模糊',
+    prompt: '基于上传的款式图进行专业成衣改款设计。严格锁定该款式的整体廓形比例、肩线、衣长/裤长比例、面料材质、颜色与图案等基础属性完全不变，仅按改款意图对指定部位做结构化调整。可改部位包括：领型（圆领/V领/翻领/立领/方领/荡领）、袖型（长袖/短袖/泡泡袖/插肩袖/落肩/喇叭袖）、门襟（单排扣/双排扣/拉链/开衫/系带）、下摆（直摆/圆摆/燕尾/不对称/开衩）、腰线、衣长、版型松紧度等。每个改款细节都必须符合真实成衣工艺逻辑——省道、拼接、包边、扣位、缝线走向合理、可生产落地，无生硬贴图、无悬浮结构。改款后款式正面展示、左右对称、比例协调、线条利落，干净白底，服装设计稿质感，细节精致、高清无噪点。',
+    negativePrompt: '结构混乱、比例失调、肩线走样、面料改变、颜色改变、图案错乱、多余肢体、多余衣物、文字、水印、模糊、低质量、版型变形、生硬贴图',
     recommendedModel: 'gpt-image-2.5-flare',
     customModels: ['gpt-image-2.5-flare', 'gpt-image-2', 'seedream-5.0-lite'],
     params: { ratio: '2K · 3:4 竖版 · 1536×2048', quality: 'XHigh（超高精度）', imageCount: 4 },
     requiresImage: true,
     steps: ['上传款式图', 'AI 识别款式结构', '按改款意图调整局部', '输出改款设计稿'],
+    modifyOptions: [
+      { group: '领型', options: [
+        { value: '圆领', label: '圆领' }, { value: 'V领', label: 'V领' },
+        { value: '翻领', label: '翻领' }, { value: '立领', label: '立领' },
+        { value: '方领', label: '方领' }, { value: '荡领', label: '荡领' }, { value: '一字领', label: '一字领' },
+      ]},
+      { group: '袖型', options: [
+        { value: '长袖', label: '长袖' }, { value: '短袖', label: '短袖' },
+        { value: '泡泡袖', label: '泡泡袖' }, { value: '插肩袖', label: '插肩袖' },
+        { value: '落肩袖', label: '落肩袖' }, { value: '喇叭袖', label: '喇叭袖' }, { value: '灯笼袖', label: '灯笼袖' },
+      ]},
+      { group: '门襟', options: [
+        { value: '单排扣', label: '单排扣' }, { value: '双排扣', label: '双排扣' },
+        { value: '拉链', label: '拉链' }, { value: '开衫', label: '开衫' },
+        { value: '系带', label: '系带' }, { value: '隐形拉链', label: '隐形拉链' },
+      ]},
+      { group: '下摆', options: [
+        { value: '直摆', label: '直摆' }, { value: '圆摆', label: '圆摆' },
+        { value: '燕尾摆', label: '燕尾' }, { value: '不对称', label: '不对称' }, { value: '波浪摆', label: '波浪摆' },
+      ]},
+      { group: '长度', options: [
+        { value: '加长', label: '加长' }, { value: '缩短', label: '缩短' },
+        { value: '标准', label: '标准' }, { value: '及膝', label: '及膝' }, { value: '超短', label: '超短' },
+      ]},
+      { group: '版型', options: [
+        { value: '修身', label: '修身' }, { value: '宽松', label: '宽松' },
+        { value: '标准', label: '标准' }, { value: 'A字', label: 'A字' },
+        { value: '直筒', label: '直筒' }, { value: '廓形', label: '廓形' },
+      ]},
+      { group: '领口设计', options: [
+        { value: '一字肩', label: '一字肩' }, { value: '露肩', label: '露肩' },
+        { value: '深V领', label: '深V领' }, { value: '高领', label: '高领' }, { value: '挖肩', label: '挖肩' },
+      ]},
+      { group: '腰线', options: [
+        { value: '高腰', label: '高腰' }, { value: '中腰', label: '中腰' },
+        { value: '低腰', label: '低腰' }, { value: '收腰', label: '收腰' },
+      ]},
+      { group: '裙型', options: [
+        { value: 'A字裙', label: 'A字裙' }, { value: '直筒裙', label: '直筒裙' },
+        { value: '百褶裙', label: '百褶裙' }, { value: '鱼尾裙', label: '鱼尾裙' },
+        { value: '包臀裙', label: '包臀裙' }, { value: '伞裙', label: '伞裙' },
+      ]},
+      { group: '裤型', options: [
+        { value: '直筒', label: '直筒' }, { value: '阔腿裤', label: '阔腿裤' },
+        { value: '喇叭裤', label: '喇叭裤' }, { value: '紧身裤', label: '紧身裤' },
+        { value: '锥形裤', label: '锥形裤' }, { value: '微喇', label: '微喇' },
+      ]},
+      { group: '后背', options: [
+        { value: '常规背', label: '常规' }, { value: '露背', label: '露背' },
+        { value: '交叉带背', label: '交叉带' }, { value: '挖背', label: '挖背' },
+      ]},
+      { group: '装饰元素', multiple: true, options: [
+        { value: '蕾丝', label: '蕾丝' }, { value: '刺绣', label: '刺绣' },
+        { value: '印花', label: '印花' }, { value: '拼接', label: '拼接' },
+        { value: '亮片', label: '亮片' }, { value: '流苏', label: '流苏' },
+        { value: '蝴蝶结', label: '蝴蝶结' }, { value: '木耳边', label: '木耳边' },
+      ]},
+      { group: '口袋', multiple: true, options: [
+        { value: '贴袋', label: '贴袋' }, { value: '插袋', label: '插袋' },
+        { value: '隐藏袋', label: '隐藏袋' },
+      ]},
+      { group: '开衩', multiple: true, options: [
+        { value: '侧开衩', label: '侧开衩' }, { value: '前开衩', label: '前开衩' },
+        { value: '后开衩', label: '后开衩' },
+      ]},
+      { group: '面料质感', options: [
+        { value: '棉麻', label: '棉麻' }, { value: '真丝垂坠', label: '真丝垂坠' },
+        { value: '雪纺飘逸', label: '雪纺飘逸' }, { value: '针织弹力', label: '针织弹力' },
+        { value: '牛仔挺括', label: '牛仔挺括' }, { value: '西装料挺括', label: '西装料' },
+        { value: '蕾丝', label: '蕾丝' }, { value: '皮革', label: '皮革' },
+      ]},
+      { group: '设计风格', options: [
+        { value: '经典基础', label: '经典基础' }, { value: '复古法式', label: '复古法式' },
+        { value: '韩系简约', label: '韩系简约' }, { value: '欧美通勤', label: '欧美通勤' },
+        { value: '新中式', label: '新中式' }, { value: '休闲运动', label: '休闲运动' },
+      ]},
+      { group: '工艺细节', multiple: true, options: [
+        { value: '明线压线', label: '明线压线' }, { value: '包边滚边', label: '包边滚边' },
+        { value: '省道收腰', label: '省道收腰' }, { value: '褶裥', label: '褶裥' },
+        { value: '罗纹收口', label: '罗纹收口' }, { value: '卷边下摆', label: '卷边下摆' },
+        { value: '双针明线', label: '双针明线' },
+      ]},
+      { group: '纽扣配件', multiple: true, options: [
+        { value: '珍珠扣', label: '珍珠扣' }, { value: '金属扣', label: '金属扣' },
+        { value: '包布扣', label: '包布扣' }, { value: '木扣', label: '木扣' }, { value: '四合扣', label: '四合扣' },
+      ]},
+    ],
+    layoutOptions: [
+      { group: '排版布局', options: [
+        { value: '单图正展', label: '单图正展' },
+        { value: '正背并排', label: '正背并排' },
+        { value: '模特正背', label: '模特正背' },
+        { value: '款式图+细节标注', label: '款式+细节' },
+        { value: '三视图', label: '三视图' },
+      ]},
+      { group: '排版模块', multiple: true, options: [
+        { value: '正面款式图', label: '正面款式图' },
+        { value: '背面款式图', label: '背面款式图' },
+        { value: '侧面款式图', label: '侧面款式图' },
+        { value: '模特上身图', label: '模特上身图' },
+        { value: '局部细节特写', label: '细节特写' },
+        { value: '细节文字标注', label: '文字标注' },
+      ]},
+    ],
   };

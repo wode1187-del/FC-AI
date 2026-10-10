@@ -92,6 +92,8 @@ export default function ApiPage() {
   // 二级自定义API (仅在 custom tab 显示)
   const customPrimary = apiConfigs.find((c) => c.id === 'api-custom-1');
   const customSecondary = apiConfigs.find((c) => c.id === 'api-custom-2');
+  const customTertiary = apiConfigs.find((c) => c.id === 'api-custom-3');
+  const secondaryCustomApis = [customSecondary, customTertiary].filter(Boolean);
 
   const getConfigByType = useCallback(
     (type: string, isSecondary = false) => {
@@ -577,6 +579,182 @@ export default function ApiPage() {
                       </div>
                     )}
 
+                    {/* Tertiary Custom API (only for custom tab) */}
+                    {tab.id === 'custom' && customTertiary && (
+                      <div className="space-y-4 p-4 rounded-lg bg-muted/30 border border-border/40">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium">自定义兼容接口 API 3</span>
+                            <Badge variant="outline" className="text-[10px] py-0 h-5">
+                              独立地址 · 并行使用
+                            </Badge>
+                          </div>
+                          <Badge
+                            variant={customTertiary.status === 'verified' ? 'default' : 'secondary'}
+                            className="text-[10px] font-normal"
+                          >
+                            {customTertiary.status === 'verified'
+                              ? '已验证'
+                              : customTertiary.status === 'error'
+                                ? '验证失败'
+                                : '待验证'}
+                          </Badge>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-muted-foreground">接口地址 (Base URL)</Label>
+                            <Input
+                              value={customTertiary.baseUrl}
+                              onChange={(e) =>
+                                updateApiConfig(customTertiary.id, { baseUrl: e.target.value })
+                              }
+                              placeholder="https://api3.example.com/v1"
+                              className="h-9 text-sm font-mono"
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-muted-foreground">API 密钥</Label>
+                            <div className="flex gap-2">
+                              <div className="flex-1 relative">
+                                <Input
+                                  type={visibleKeys[customTertiary.id] ? 'text' : 'password'}
+                                  value={customTertiary.apiKey}
+                                  onChange={(e) =>
+                                    updateApiConfig(customTertiary.id, { apiKey: e.target.value })
+                                  }
+                                  placeholder="sk-..."
+                                  className="h-9 text-sm font-mono pr-20"
+                                />
+                                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6"
+                                    onClick={() => toggleKeyVisibility(customTertiary.id)}
+                                  >
+                                    {visibleKeys[customTertiary.id] ? (
+                                      <EyeOff className="size-3.5" />
+                                    ) : (
+                                      <Eye className="size-3.5" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6"
+                                    onClick={() => handleCopyKey(customTertiary.apiKey)}
+                                    disabled={!customTertiary.apiKey}
+                                  >
+                                    <Copy className="size-3.5" />
+                                  </Button>
+                                </div>
+                              </div>
+                              <Button
+                                onClick={() => handleVerify(customTertiary.id)}
+                                variant="default"
+                                size="sm"
+                                className="h-9"
+                                disabled={verifyingId === customTertiary.id}
+                              >
+                                <RefreshCw className={`size-3.5 mr-1.5 ${verifyingId === customTertiary.id ? 'animate-spin' : ''}`} />
+                                {verifyingId === customTertiary.id ? '加载中...' : '验证并加载模型'}
+                              </Button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-muted-foreground">图生图字段名</Label>
+                            <Select
+                              value={customTertiary.imageEditField || 'auto'}
+                              onValueChange={(val) => {
+                                updateApiConfig(customTertiary.id, {
+                                 imageEditField: val as IApiConfig['imageEditField'],
+                                 cachedImageEditStrategy: undefined,
+                                 cachedImageEditStrategyFailures: 0,
+                                });
+                              }}
+                            >
+                              <SelectTrigger className="h-9 text-sm">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="auto">自动检测（推荐）</SelectItem>
+                                <SelectItem value="images">images</SelectItem>
+                                <SelectItem value="image">image</SelectItem>
+                                <SelectItem value="source_image">source_image</SelectItem>
+                                <SelectItem value="image_file">image_file</SelectItem>
+                                <SelectItem value="input_image">input_image</SelectItem>
+                                <SelectItem value="init_image">init_image</SelectItem>
+                              </SelectContent>
+                            </Select>
+                             <div className="text-[11px] text-muted-foreground flex items-center gap-2">
+                               <span>自动检测会依次尝试，成功后自动缓存</span>
+                               {customTertiary.cachedImageEditStrategy && (
+                                 <Badge variant="outline" className="text-[10px] h-4 py-0">
+                                   已缓存: {customTertiary.cachedImageEditStrategy.endpointType}/{customTertiary.cachedImageEditStrategy.format}
+                                 </Badge>
+                               )}
+                             </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <Label className="text-xs text-muted-foreground">图生图模式</Label>
+                            <Select
+                              value={customTertiary.imageEditMode || 'auto'}
+                              onValueChange={(val) => {
+                                updateApiConfig(customTertiary.id, {
+                                  imageEditMode: val as IApiConfig['imageEditMode'],
+                                });
+                              }}
+                            >
+                              <SelectTrigger className="h-9 text-sm">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="auto">自动检测（推荐）</SelectItem>
+                                <SelectItem value="edits">edits 端点</SelectItem>
+                                <SelectItem value="generations">generations 端点传图</SelectItem>
+                                <SelectItem value="variations">variations 端点</SelectItem>
+                              </SelectContent>
+                            </Select>
+                            <div className="text-[11px] text-muted-foreground">
+                              自动检测会依次尝试 edits → generations → variations 三种端点
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <Label className="text-xs text-muted-foreground">图生图强度</Label>
+                              <span className="text-xs font-mono text-foreground">
+                                {(customTertiary.imageEditStrength ?? 0.75).toFixed(2)}
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0.1}
+                              max={1}
+                              step={0.05}
+                              value={customTertiary.imageEditStrength ?? 0.75}
+                              onChange={(e) => {
+                                updateApiConfig(customTertiary.id, {
+                                  imageEditStrength: parseFloat(e.target.value),
+                                });
+                              }}
+                              className="w-full h-2 accent-primary"
+                            />
+                            <div className="text-[11px] text-muted-foreground flex justify-between">
+                              <span>偏创意（弱）</span>
+                              <span>偏还原（强）</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Model Library */}
                     <div className="space-y-4">
                       <div className="flex items-center justify-between">
@@ -584,7 +762,7 @@ export default function ApiPage() {
                           <span className="text-sm font-medium">模型库</span>
                           <span className="text-xs text-muted-foreground">
                             待确认 {tabTotalCount - tabActiveCount} / {tabTotalCount} · 已生效 {tabActiveCount} 个
-                            {tab.id === 'custom' && ' · 两个接口共用'}
+                            {tab.id === 'custom' && ' · 多接口共用'}
                           </span>
                         </div>
                       </div>
@@ -675,6 +853,11 @@ export default function ApiPage() {
                                     {model.apiConfigId === 'api-custom-2' && (
                                       <span className="ml-1 inline-block px-1 py-0.5 rounded text-[9px] bg-secondary/10 text-secondary align-middle">
                                         API 2
+                                      </span>
+                                    )}
+                                    {model.apiConfigId === 'api-custom-3' && (
+                                      <span className="ml-1 inline-block px-1 py-0.5 rounded text-[9px] bg-secondary/10 text-secondary align-middle">
+                                        API 3
                                       </span>
                                     )}
                                     {model.apiConfigId === 'api-custom-1' && (

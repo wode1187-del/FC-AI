@@ -1,0 +1,2 @@
+IN pixel_values ['batch_size', 'num_channels', 'height', 'width'] tensor(float)
+OUT logits ['batch_size', 'num_labels', 'height', 'width'] tensor(float)

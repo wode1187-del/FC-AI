@@ -7,7 +7,7 @@ export const designUpscale: IFeatureTemplate = {
     icon: '🔍',
     category: 'design',
     mode: 'img2img',
-    prompt: '将上传的图片进行高清无损放大，细节增强、边缘锐利、纹理清晰，保持原图内容与色彩完全不变，画质提升至电商大图标准，无锯齿无模糊。',
+    prompt: '将上传的图片进行高清无损放大，细节增强、边缘锐利、纹理清晰，保持原图内容与色彩完全不变，画质提升至电商大图标准，无锯齿无模糊。禁止图片变色。禁止图片偏色。',
     negativePrompt: '变形、纹理涂抹、颜色偏移、模糊',
     recommendedModel: 'gpt-image-2.5-flare',
     customModels: ['gpt-image-2.5-flare', 'gpt-image-2'],

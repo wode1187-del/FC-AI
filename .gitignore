@@ -52,3 +52,7 @@ fix-bom.py
 tsc_errors.txt
 __fcai_bak_tmp
 
+
+# Project backups
+backups
+

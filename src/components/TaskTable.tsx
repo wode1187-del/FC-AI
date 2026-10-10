@@ -74,6 +74,7 @@ import { Image } from '@/components/ui/image';
 import { logger, scopedStorage } from '@lark-apaas/client-toolkit-lite';
 import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
+import MaskEditor from '@/components/MaskEditor';
 import { useApp } from '@/context/AppContext';
 import { isVideoModel, getFeatureTemplate } from '@/data/featureTemplates';
 import { getResolutionGroups, type ITask } from '@/data/models';
@@ -104,6 +105,35 @@ const TaskPromptCell = memo(function TaskPromptCell({
   const featureTpl = task.featureId ? getFeatureTemplate(task.featureId) : undefined;
   const tryonTypes = featureTpl?.tryonTypes;
   const currentTryonType = task.tryonType || 'clothes';
+  const modifyOptions = featureTpl?.modifyOptions;
+  const layoutOptions = featureTpl?.layoutOptions;
+  // 自由改款快捷选项（多选组合）：记录每个维度已选改法（数组以支持同维度多选）
+  const [modifySel, setModifySel] = useState<Record<string, string[]>>({});
+  // 自由改款设计稿排版选项：布局单选、模块可多选
+  const [layoutSel, setLayoutSel] = useState<Record<string, string[]>>({});
+  // 自由改款专属：用户自定义补充提示词（独立于改款/排版自动提示词）
+  const [localCustom, setLocalCustom] = useState(task.customPrompt || '');
+  // 合成完整提示词 = 基础 + 【改款意图】 + 【排版】 + 【自定义】
+  const buildPrompt = useCallback((
+    mod: Record<string, string[]>,
+    lay: Record<string, string[]>,
+    custom: string,
+  ) => {
+    const base = (localPrompt || '').split('\n【改款意图】')[0].split('\n【排版】')[0].split('\n【自定义】')[0];
+    const modEntries = Object.entries(mod).filter(([, v]) => v && v.length > 0);
+    const modIntent = modEntries.length
+      ? '\n【改款意图】' + modEntries.map(([gr, vals]) => {
+          const gm = modifyOptions?.find(x => x.group === gr);
+          return gm && gm.multiple ? `${gr}增加${vals.join('、')}` : `${gr}改为${vals[0]}`;
+        }).join('；')
+      : '';
+    const layEntries = Object.entries(lay).filter(([, v]) => v && v.length > 0);
+    const layIntent = layEntries.length
+      ? '\n【排版】' + layEntries.map(([gr, vals]) => `${gr}：${vals.join('、')}`).join('；')
+      : '';
+    const customSeg = custom ? '\n【自定义】' + custom : '';
+    return base + modIntent + layIntent + customSeg;
+  }, [localPrompt, modifyOptions]);
   const [optimizeInput, setOptimizeInput] = useState('');
   const [showOptimize, setShowOptimize] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
@@ -116,6 +146,10 @@ const TaskPromptCell = memo(function TaskPromptCell({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.prompt]);
+  // 切换任务时重置自定义提示词
+  useEffect(() => {
+    setLocalCustom(task.customPrompt || '');
+  }, [task.id, task.customPrompt]);
 
   const syncToGlobal = useCallback((value: string) => {
     if (value !== task.prompt) {
@@ -231,7 +265,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
   return (
     <div className="space-y-2">
       {tryonTypes && tryonTypes.length > 0 && (
-        <div className="flex flex-wrap gap-1">
+        <div className={task.featureId === 'shoot-3d' ? 'flex flex-wrap gap-1.5 justify-center' : 'flex flex-wrap gap-1'}>
           {tryonTypes.map((t) => (
             <button
               key={t.id}
@@ -239,7 +273,9 @@ const TaskPromptCell = memo(function TaskPromptCell({
                 updateTask(task.id, { tryonType: t.id as ITask['tryonType'], prompt: t.prompt });
                 setLocalPrompt(t.prompt);
               }}
-              className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+              className={`rounded border transition-colors ${
+                task.featureId === 'shoot-3d' ? 'px-3 py-1 text-xs' : 'px-2 py-0.5 text-[10px]'
+              } ${
                 currentTryonType === t.id
                   ? 'bg-primary text-primary-foreground border-primary'
                   : 'bg-background text-muted-foreground border-border hover:bg-accent'
@@ -270,6 +306,106 @@ const TaskPromptCell = memo(function TaskPromptCell({
               🧩 拼图展示
             </button>
           )}
+        </div>
+      )}
+      {/* 自由改款快捷选项（仅自由改款功能显示，结构维度单选 / 装饰等维度可多选叠加） */}
+      {task.featureId === 'design-modify' && modifyOptions && modifyOptions.length > 0 && (
+        <div className="space-y-1 border border-border/50 rounded-md p-2 bg-muted/30">
+          <span className="text-[10px] text-muted-foreground block">✂️ 改款部位（结构维度单选；装饰/口袋/开衩可多选叠加，点击即写入提示词）</span>
+          {modifyOptions.map(g => (
+            <div key={g.group} className="flex flex-wrap items-center gap-1">
+              <span className="text-[10px] text-muted-foreground w-8 shrink-0">{g.group}</span>
+              {g.options.map(o => {
+                const selArr = modifySel[g.group] || [];
+                const active = selArr.includes(o.value);
+                return (
+                  <button
+                    key={o.value}
+                    onClick={() => {
+                      const multiple = !!g.multiple;
+                      let nextArr: string[];
+                      if (multiple) {
+                        nextArr = active ? selArr.filter(x => x !== o.value) : [...selArr, o.value];
+                      } else {
+                        nextArr = active ? [] : [o.value];
+                      }
+                      const next = { ...modifySel, [g.group]: nextArr };
+                      setModifySel(next);
+                      const np = buildPrompt(next, layoutSel, localCustom);
+                      updateTask(task.id, { prompt: np });
+                      setLocalPrompt(np);
+                    }}
+                    className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                      active
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'bg-background text-muted-foreground border-border hover:bg-accent'
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+      {/* 自由改款设计稿排版选项（布局单选；模块可多选叠加，点击即写入提示词） */}
+      {task.featureId === 'design-modify' && layoutOptions && layoutOptions.length > 0 && (
+        <div className="space-y-1 border border-border/50 rounded-md p-2 bg-muted/30">
+          <span className="text-[10px] text-muted-foreground block">📐 设计稿排版（布局单选；模块可多选叠加，点击即写入提示词）</span>
+          {layoutOptions.map(g => (
+            <div key={g.group} className="flex flex-wrap items-center gap-1">
+              <span className="text-[10px] text-muted-foreground w-8 shrink-0">{g.group}</span>
+              {g.options.map(o => {
+                const selArr = layoutSel[g.group] || [];
+                const active = selArr.includes(o.value);
+                return (
+                  <button
+                    key={o.value}
+                    onClick={() => {
+                      const multiple = !!g.multiple;
+                      let nextArr: string[];
+                      if (multiple) {
+                        nextArr = active ? selArr.filter(x => x !== o.value) : [...selArr, o.value];
+                      } else {
+                        nextArr = active ? [] : [o.value];
+                      }
+                      const next = { ...layoutSel, [g.group]: nextArr };
+                      setLayoutSel(next);
+                      const np = buildPrompt(modifySel, next, localCustom);
+                      updateTask(task.id, { prompt: np });
+                      setLocalPrompt(np);
+                    }}
+                    className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                      active
+                        ? 'bg-primary text-primary-foreground border-primary'
+                        : 'bg-background text-muted-foreground border-border hover:bg-accent'
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+      {/* 自由改款专属：自定义补充提示词（独立输入，提交时合成到完整提示词，与上方选项分开存储） */}
+      {task.featureId === 'design-modify' && (
+        <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-1">
+          <span className="text-[10px] text-muted-foreground block">✍️ 自定义提示词（可选，补充你的改款要求，独立存放不混入选项）</span>
+          <Textarea
+            value={localCustom}
+            onChange={(e) => {
+              const v = e.target.value;
+              setLocalCustom(v);
+              const np = buildPrompt(modifySel, layoutSel, v);
+              updateTask(task.id, { customPrompt: v, prompt: np });
+              setLocalPrompt(np);
+            }}
+            placeholder="例如：改成方领+泡泡袖，真丝垂坠感，加长及膝…"
+            className="min-h-[60px] text-xs resize-none"
+          />
         </div>
       )}
       {/* 融合滤镜开关（仅AI换背景功能显示，不依赖tryonTypes） */}
@@ -367,14 +503,17 @@ const TaskPromptCell = memo(function TaskPromptCell({
           </button>
         </div>
       )}
-      <Textarea
-        value={localPrompt}
-        onChange={handleChange}
-        onBlur={handleBlur}
-        placeholder="输入完整提示词..."
-        className="min-h-[80px] text-xs resize-none"
-      />
-      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'shoot-flat' && task.featureId !== 'design-recolor' && (
+      {/* 提示词文本框：服装转3D/衣服去皱/高清放大/服装改色/自由改款 由默认提示词+选项面板驱动，隐藏文本框 */}
+      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'design-upscale' && task.featureId !== 'design-recolor' && task.featureId !== 'design-modify' && (
+        <Textarea
+          value={localPrompt}
+          onChange={handleChange}
+          onBlur={handleBlur}
+          placeholder="输入完整提示词..."
+          className="min-h-[80px] text-xs resize-none"
+        />
+      )}
+      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'shoot-flat' && task.featureId !== 'design-recolor' && task.featureId !== 'design-upscale' && (
       <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
@@ -530,21 +669,21 @@ const TaskPromptCell = memo(function TaskPromptCell({
         </div>
       )}
       {/* 色彩保真控制（防偏色） */}
-      <div className="border border-primary/20 rounded-md p-2 bg-primary/5 space-y-1.5">
+      <div className={`border border-primary/20 rounded-md p-2 bg-primary/5 space-y-1.5 ${task.featureId === 'shoot-3d' ? 'flex flex-col items-center' : ''}`}>
         <div className="flex items-center justify-between">
-          <span className="text-[11px] text-primary font-medium flex items-center gap-1">
-            <Palette className="size-3" /> 色彩保真（防偏色）
+          <span className={`text-primary font-medium flex items-center gap-1 ${task.featureId === 'shoot-3d' ? 'text-sm' : 'text-[11px]'}`}>
+            <Palette className={task.featureId === 'shoot-3d' ? 'size-4' : 'size-3'} /> 色彩保真（防偏色）
           </span>
           {task.colorLevel && (
             <button
               onClick={() => updateTask(task.id, { colorLevel: undefined, colorScope: undefined, colorIntensity: undefined })}
-              className="text-[10px] text-muted-foreground hover:text-destructive"
+              className={`text-muted-foreground hover:text-destructive ${task.featureId === 'shoot-3d' ? 'text-xs' : 'text-[10px]'}`}
             >
               清除
             </button>
           )}
         </div>
-        <div className="flex gap-1">
+        <div className={task.featureId === 'shoot-3d' ? 'flex gap-1.5 justify-center' : 'flex gap-1'}>
           {([
             { id: 'standard', label: '标准' },
             { id: 'high', label: '高保真' },
@@ -553,7 +692,9 @@ const TaskPromptCell = memo(function TaskPromptCell({
             <button
               key={opt.id}
               onClick={() => updateTask(task.id, { colorLevel: task.colorLevel === opt.id ? undefined : opt.id })}
-              className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+              className={`rounded border transition-colors ${
+                task.featureId === 'shoot-3d' ? 'text-xs px-3 py-1' : 'text-[10px] px-1.5 py-0.5'
+              } ${
                 task.colorLevel === opt.id
                   ? 'bg-primary text-white border-primary'
                   : 'bg-background text-muted-foreground border-border/60 hover:border-primary/40'
@@ -565,7 +706,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
         </div>
         {task.colorLevel && (
           <>
-            <div className="flex flex-wrap gap-1">
+            <div className={task.featureId === 'shoot-3d' ? 'flex flex-wrap gap-1.5 justify-center' : 'flex flex-wrap gap-1'}>
               {([
                 { id: 'clothes', label: '👕 服装原色' },
                 { id: 'skin', label: '🧑 肤色' },
@@ -583,7 +724,9 @@ const TaskPromptCell = memo(function TaskPromptCell({
                       const next = active ? cur.filter(x => x !== opt.id) : [...cur, opt.id];
                       updateTask(task.id, { colorScope: next.length ? next : undefined });
                     }}
-                    className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                    className={`rounded border transition-colors ${
+                      task.featureId === 'shoot-3d' ? 'text-xs px-2.5 py-1' : 'text-[10px] px-1.5 py-0.5'
+                    } ${
                       active
                         ? 'bg-primary/20 text-primary border-primary/40'
                         : 'bg-background text-muted-foreground border-border/60 hover:border-primary/40'
@@ -595,7 +738,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
               })}
             </div>
             <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-muted-foreground whitespace-nowrap">强度</span>
+              <span className={`text-muted-foreground whitespace-nowrap ${task.featureId === 'shoot-3d' ? 'text-xs' : 'text-[10px]'}`}>强度</span>
               <input
                 type="range"
                 min={0}
@@ -604,7 +747,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
                 onChange={(e) => updateTask(task.id, { colorIntensity: parseInt(e.target.value) })}
                 className="flex-1 h-1 accent-primary"
               />
-              <span className="text-[10px] text-primary w-7 text-right">{task.colorIntensity ?? 75}%</span>
+              <span className={`text-primary w-7 text-right ${task.featureId === 'shoot-3d' ? 'text-xs' : 'text-[10px]'}`}>{task.colorIntensity ?? 75}%</span>
             </div>
             {/* 高级选项 */}
             <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 border-t border-border/40">
@@ -685,6 +828,8 @@ export default function TaskTable() {
   const [errorDetailTask, setErrorDetailTask] = useState<ITask | null>(null);
   // 图片编辑器
   const [editorImage, setEditorImage] = useState<{ taskId: string; imgIndex: number; url: string; name: string } | null>(null);
+  // 蒙版编辑器
+  const [maskEditor, setMaskEditor] = useState<{ taskId: string; url: string; name: string } | null>(null);
 
   // ===== 列宽配置 =====
   interface ColumnWidth { key: string; label: string; defaultWidth: number; minWidth: number; width: number; flex?: boolean; }
@@ -1460,6 +1605,20 @@ export default function TaskTable() {
                                             <div className="text-sm font-semibold text-foreground flex items-center gap-1.5">
                                               <span className="text-base">{s.icon}</span>{s.label}
                                             </div>
+                                            {s.id === 'base' && (
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  const baseImg = slotImgs[0];
+                                                  if (!baseImg) { toast.warning('请先上传原图'); return; }
+                                                  setMaskEditor({ taskId: task.id, url: baseImg.url, name: baseImg.name || s.label });
+                                                }}
+                                                title="蒙版编辑：涂抹要重绘的区域（如衣服），其他像素保持不变"
+                                                className={`ml-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors ${task.maskEnabled ? 'border-primary text-primary bg-primary/10' : 'border-border text-muted-foreground hover:text-primary hover:border-primary/50'}`}
+                                              >
+                                                🎯 蒙版{task.maskEnabled ? '✓' : ''}
+                                              </button>
+                                            )}
                                           </div>
                                           {slotImgs.length > 0 && (
                                             <div className="flex flex-wrap gap-1.5">
@@ -1541,18 +1700,32 @@ export default function TaskTable() {
 
                 {/* Prompt */}
                 <td className="px-3 py-3 align-top" style={{ width: colWidth('prompt') }}>
-                  <TaskPromptCell
-                    task={task}
-                    textOptimizeConfig={textOptimizeConfig}
-                    allTextModels={allTextModels}
-                    updateTask={updateTask}
-                    updateTextOptimizeConfig={updateTextOptimizeConfig}
-                    navigate={navigate}
-                  />
+                  {task.featureId === 'design-remove-bg' ? (
+                    <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center">
+                      <p className="text-[11px] text-muted-foreground">本地 RMBG 抠图</p>
+                      <p className="text-[10px] text-muted-foreground/70 mt-1">无需提示词 · 主体原样保留</p>
+                    </div>
+                  ) : (
+                    <TaskPromptCell
+                      task={task}
+                      textOptimizeConfig={textOptimizeConfig}
+                      allTextModels={allTextModels}
+                      updateTask={updateTask}
+                      updateTextOptimizeConfig={updateTextOptimizeConfig}
+                      navigate={navigate}
+                    />
+                  )}
                 </td>
 
                 {/* Generation Params */}
                 <td className="px-3 py-3 align-top" style={{ width: colWidth('params') }}>
+                  {task.featureId === 'design-remove-bg' ? (
+                    <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center">
+                      <p className="text-[11px] text-muted-foreground">本地 RMBG 抠图</p>
+                      <p className="text-[10px] text-muted-foreground/70 mt-1">无需模型 / 分辨率 / 质量参数</p>
+                    </div>
+                  ) : (
+                  <>
                   {activeModels.length === 0 ? (
                     <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center">
                       <Settings className="size-4 mx-auto mb-1.5 text-muted-foreground" />
@@ -1590,10 +1763,10 @@ export default function TaskTable() {
                                 ))}
                               </SelectGroup>
                             )}
-                            {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2').length > 0 && (
+                            {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2' && m.apiConfigId !== 'api-custom-3').length > 0 && (
                               <SelectGroup>
                                 <SelectLabel className="text-[9px] text-muted-foreground">API 1 模型</SelectLabel>
-                                {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2').map((m) => (
+                                {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2' && m.apiConfigId !== 'api-custom-3').map((m) => (
                                   <SelectItem key={m.id} value={m.id} className="text-xs">
                                     {m.name}
                                   </SelectItem>
@@ -1604,6 +1777,16 @@ export default function TaskTable() {
                               <SelectGroup>
                                 <SelectLabel className="text-[9px] text-muted-foreground">API 2 模型</SelectLabel>
                                 {activeModels.filter(m => m.isCustom && m.apiConfigId === 'api-custom-2').map((m) => (
+                                  <SelectItem key={m.id} value={m.id} className="text-xs">
+                                    {m.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            )}
+                            {activeModels.filter(m => m.isCustom && m.apiConfigId === 'api-custom-3').length > 0 && (
+                              <SelectGroup>
+                                <SelectLabel className="text-[9px] text-muted-foreground">API 3 模型</SelectLabel>
+                                {activeModels.filter(m => m.isCustom && m.apiConfigId === 'api-custom-3').map((m) => (
                                   <SelectItem key={m.id} value={m.id} className="text-xs">
                                     {m.name}
                                   </SelectItem>
@@ -1738,6 +1921,8 @@ export default function TaskTable() {
                       </div>
                     </div>
                   )}
+                  </>
+                  )}
                 </td>
 
                 {/* Actions */}
@@ -1756,16 +1941,18 @@ export default function TaskTable() {
                       )}
                       立即生成
                     </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-8 text-xs"
-                      onClick={() => handleRegenerateAppend(task.id)}
-                      disabled={task.status === 'generating'}
-                    >
-                      <RefreshCw className="size-3.5 mr-1" />
-                      重新生成并追加
-                    </Button>
+                    {task.featureId !== 'design-remove-bg' && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 text-xs"
+                        onClick={() => handleRegenerateAppend(task.id)}
+                        disabled={task.status === 'generating'}
+                      >
+                        <RefreshCw className="size-3.5 mr-1" />
+                        重新生成并追加
+                      </Button>
+                    )}
                   </div>
                 </td>
 
@@ -2052,6 +2239,23 @@ export default function TaskTable() {
             : undefined
         }
          />
+
+       {/* 蒙版编辑器 */}
+       <MaskEditor
+         open={!!maskEditor}
+         onClose={() => setMaskEditor(null)}
+         imageUrl={maskEditor?.url || ''}
+         imageName={maskEditor?.name}
+         onSave={(maskDataUrl) => {
+           if (maskEditor) {
+             updateTask(maskEditor.taskId, {
+               maskEnabled: maskDataUrl !== null,
+               maskDataUrl: maskDataUrl || undefined,
+               maskMode: maskDataUrl ? 'manual_fixed' : undefined,
+             });
+           }
+         }}
+       />
 
        {/* 失败详情弹窗 */}
        <Dialog open={!!errorDetailTask} onOpenChange={(open) => !open && setErrorDetailTask(null)}>

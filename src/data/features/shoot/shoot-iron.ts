@@ -7,7 +7,7 @@ export const shootIron: IFeatureTemplate = {
     icon: '🧺',
     category: 'shoot',
     mode: 'img2img',
-    prompt: '去除服装上的所有褶皱与折痕，让衣服变得平整挺括、版型利落，保持服装的颜色、图案、材质和结构完全不变，自然悬垂效果，商业服装展示质感，干净背景，高清细节。',
+    prompt: '去除服装上的所有褶皱与折痕，让衣服变得平整挺括、版型利落，保持服装的颜色、图案、材质和结构完全不变，同时百分百保留衣服质感。高清细节。禁止重绘图片细节。禁止人物偏色。禁止皮肤变色。禁止重绘皮肤。禁止重绘背景。',
     negativePrompt: '残留褶皱、变形、纹理丢失、模糊',
     recommendedModel: 'nano-banana-2',
     customModels: ['nano-banana-2', 'gpt-image-2', 'gpt-image-2.5-flare'],

@@ -1,0 +1,26 @@
+== mattmdjaga/segformer_b0_clothes
+  .gitattributes  None
+  README.md  None
+  config.json  None
+  handler.py  None
+  model.safetensors  None
+  preprocessor_config.json  None
+  pytorch_model.bin  None
+== mattmdjaga/segformer_b2_clothes
+  .gitattributes  None
+  .gitignore  None
+  README.md  None
+  config.json  None
+  handler.py  None
+  mattmdjaga_segformer_b2_clothes.json  None
+  model.safetensors  None
+  onnx/config.json  None
+  onnx/model.onnx  None
+  onnx/preprocessor_config.json  None
+  optimizer.pt  None
+  preprocessor_config.json  None
+  pytorch_model.bin  None
+  rng_state.pth  None
+  scheduler.pt  None
+  trainer_state.json  None
+  training_args.bin  None

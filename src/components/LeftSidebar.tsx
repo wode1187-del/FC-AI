@@ -409,10 +409,10 @@ export default function LeftSidebar() {
                     ))}
                   </SelectGroup>
                 )}
-                {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2').length > 0 && (
+                {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2' && m.apiConfigId !== 'api-custom-3').length > 0 && (
                   <SelectGroup>
                     <SelectLabel className="text-[10px] text-muted-foreground">API 1 模型</SelectLabel>
-                    {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2').map((m) => (
+                    {activeModels.filter(m => m.isCustom && m.apiConfigId !== 'api-custom-2' && m.apiConfigId !== 'api-custom-3').map((m) => (
                       <SelectItem key={m.id} value={m.id} className="text-sm">
                         {m.name}
                       </SelectItem>
@@ -423,6 +423,16 @@ export default function LeftSidebar() {
                   <SelectGroup>
                     <SelectLabel className="text-[10px] text-muted-foreground">API 2 模型</SelectLabel>
                     {activeModels.filter(m => m.isCustom && m.apiConfigId === 'api-custom-2').map((m) => (
+                      <SelectItem key={m.id} value={m.id} className="text-sm">
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                )}
+                {activeModels.filter(m => m.isCustom && m.apiConfigId === 'api-custom-3').length > 0 && (
+                  <SelectGroup>
+                    <SelectLabel className="text-[10px] text-muted-foreground">API 3 模型</SelectLabel>
+                    {activeModels.filter(m => m.isCustom && m.apiConfigId === 'api-custom-3').map((m) => (
                       <SelectItem key={m.id} value={m.id} className="text-sm">
                         {m.name}
                       </SelectItem>
