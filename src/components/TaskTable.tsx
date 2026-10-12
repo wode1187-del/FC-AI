@@ -104,13 +104,14 @@ const TaskPromptCell = memo(function TaskPromptCell({
   // 换装部位选择（款式上身功能专属）
   const featureTpl = task.featureId ? getFeatureTemplate(task.featureId) : undefined;
   const tryonTypes = featureTpl?.tryonTypes;
-  const currentTryonType = task.tryonType || 'clothes';
+  const currentTryonType = task.tryonType || (task.featureId === 'shoot-iron' ? 'full' : 'clothes');
   const modifyOptions = featureTpl?.modifyOptions;
   const layoutOptions = featureTpl?.layoutOptions;
   // 自由改款快捷选项（多选组合）：记录每个维度已选改法（数组以支持同维度多选）
-  const [modifySel, setModifySel] = useState<Record<string, string[]>>({});
-  // 自由改款设计稿排版选项：布局单选、模块可多选
+  const [modifySel, setModifySel] = useState<Record<string, string[]>>({});  // 自由改款设计稿排版选项：布局单选、模块可多选
   const [layoutSel, setLayoutSel] = useState<Record<string, string[]>>({});
+  // 选项选择面板开关：点击后弹出一页平铺全部选项的面板
+  const [openOptionPanel, setOpenOptionPanel] = useState(false);
   // 自由改款专属：用户自定义补充提示词（独立于改款/排版自动提示词）
   const [localCustom, setLocalCustom] = useState(task.customPrompt || '');
   // 合成完整提示词 = 基础 + 【改款意图】 + 【排版】 + 【自定义】
@@ -146,9 +147,11 @@ const TaskPromptCell = memo(function TaskPromptCell({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.prompt]);
-  // 切换任务时重置自定义提示词
+  // 切换任务时重置自定义提示词与选项，避免跨任务残留污染合成提示词
   useEffect(() => {
     setLocalCustom(task.customPrompt || '');
+    setModifySel({});
+    setLayoutSel({});
   }, [task.id, task.customPrompt]);
 
   const syncToGlobal = useCallback((value: string) => {
@@ -308,92 +311,119 @@ const TaskPromptCell = memo(function TaskPromptCell({
           )}
         </div>
       )}
-      {/* 自由改款快捷选项（仅自由改款功能显示，结构维度单选 / 装饰等维度可多选叠加） */}
-      {task.featureId === 'design-modify' && modifyOptions && modifyOptions.length > 0 && (
-        <div className="space-y-1 border border-border/50 rounded-md p-2 bg-muted/30">
-          <span className="text-[10px] text-muted-foreground block">✂️ 改款部位（结构维度单选；装饰/口袋/开衩可多选叠加，点击即写入提示词）</span>
-          {modifyOptions.map(g => (
-            <div key={g.group} className="flex flex-wrap items-center gap-1">
-              <span className="text-[10px] text-muted-foreground w-8 shrink-0">{g.group}</span>
-              {g.options.map(o => {
-                const selArr = modifySel[g.group] || [];
-                const active = selArr.includes(o.value);
-                return (
-                  <button
-                    key={o.value}
-                    onClick={() => {
-                      const multiple = !!g.multiple;
-                      let nextArr: string[];
-                      if (multiple) {
-                        nextArr = active ? selArr.filter(x => x !== o.value) : [...selArr, o.value];
-                      } else {
-                        nextArr = active ? [] : [o.value];
-                      }
-                      const next = { ...modifySel, [g.group]: nextArr };
-                      setModifySel(next);
-                      const np = buildPrompt(next, layoutSel, localCustom);
-                      updateTask(task.id, { prompt: np });
-                      setLocalPrompt(np);
-                    }}
-                    className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
-                      active
-                        ? 'bg-primary text-primary-foreground border-primary'
-                        : 'bg-background text-muted-foreground border-border hover:bg-accent'
-                    }`}
-                  >
-                    {o.label}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
+      {/* 自由改款/模特变身/模特换姿 快捷选项：点击打开选择面板，面板内分组平铺全部选项 */}
+      {task.featureId && ['design-modify','shoot-model-swap','shoot-pose'].includes(task.featureId) && modifyOptions && modifyOptions.length > 0 && (
+        <div className="border border-border/50 rounded-md p-2 bg-muted/30">
+          <button
+            onClick={() => setOpenOptionPanel(true)}
+            className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded border border-border bg-background hover:bg-accent transition-colors text-left"
+          >
+            <span className="text-[11px] font-medium text-foreground">
+              {task.featureId === 'design-modify' ? '✂️ 改款选项' : task.featureId === 'shoot-model-swap' ? '💃 模特形象选项' : '🧍 姿势与镜头选项'}
+            </span>
+            <span className="text-[10px] text-primary">
+              {(() => {
+                const total = modifyOptions.reduce((s, g) => s + (modifySel[g.group] || []).length, 0)
+                  + (layoutOptions ? layoutOptions.reduce((s, g) => s + (layoutSel[g.group] || []).length, 0) : 0);
+                return total > 0 ? `已选 ${total} 项 · 点击调整` : '点击打开选项面板';
+              })()}
+            </span>
+          </button>
+          {(() => {
+            const parts: string[] = [];
+            modifyOptions.forEach(g => { const a = modifySel[g.group] || []; if (a.length) parts.push(`${g.group}(${a.length})`); });
+            (layoutOptions || []).forEach(g => { const a = layoutSel[g.group] || []; if (a.length) parts.push(`${g.group}(${a.length})`); });
+            return parts.length ? (
+              <div className="text-[10px] text-muted-foreground mt-1 px-1 truncate" title={parts.join(' · ')}>{parts.join(' · ')}</div>
+            ) : null;
+          })()}
         </div>
       )}
-      {/* 自由改款设计稿排版选项（布局单选；模块可多选叠加，点击即写入提示词） */}
-      {task.featureId === 'design-modify' && layoutOptions && layoutOptions.length > 0 && (
-        <div className="space-y-1 border border-border/50 rounded-md p-2 bg-muted/30">
-          <span className="text-[10px] text-muted-foreground block">📐 设计稿排版（布局单选；模块可多选叠加，点击即写入提示词）</span>
-          {layoutOptions.map(g => (
-            <div key={g.group} className="flex flex-wrap items-center gap-1">
-              <span className="text-[10px] text-muted-foreground w-8 shrink-0">{g.group}</span>
-              {g.options.map(o => {
-                const selArr = layoutSel[g.group] || [];
-                const active = selArr.includes(o.value);
-                return (
-                  <button
-                    key={o.value}
-                    onClick={() => {
-                      const multiple = !!g.multiple;
-                      let nextArr: string[];
-                      if (multiple) {
-                        nextArr = active ? selArr.filter(x => x !== o.value) : [...selArr, o.value];
-                      } else {
-                        nextArr = active ? [] : [o.value];
-                      }
-                      const next = { ...layoutSel, [g.group]: nextArr };
-                      setLayoutSel(next);
-                      const np = buildPrompt(modifySel, next, localCustom);
-                      updateTask(task.id, { prompt: np });
-                      setLocalPrompt(np);
-                    }}
-                    className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
-                      active
-                        ? 'bg-primary text-primary-foreground border-primary'
-                        : 'bg-background text-muted-foreground border-border hover:bg-accent'
-                    }`}
-                  >
-                    {o.label}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-      )}
-      {/* 自由改款专属：自定义补充提示词（独立输入，提交时合成到完整提示词，与上方选项分开存储） */}
-      {task.featureId === 'design-modify' && (
+      {/* 改款/形象/姿势 选项选择面板：点击「打开选项面板」弹出，分组平铺全部选项，一页选择 */}
+      <Dialog open={openOptionPanel} onOpenChange={setOpenOptionPanel}>
+        <DialogContent className="max-w-xl max-h-[82vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-sm">
+              {task.featureId === 'design-modify' ? '✂️ 改款选项（点击选择，自动写入提示词）'
+                : task.featureId === 'shoot-model-swap' ? '💃 模特形象选项（单选）'
+                : '🧍 姿势与镜头选项'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+            {modifyOptions && modifyOptions.map(g => {
+              const selArr = modifySel[g.group] || [];
+              return (
+                <div key={g.group}>
+                  <div className="text-xs font-medium text-foreground mb-1 flex items-center justify-between">
+                    <span>{g.group}</span>
+                    {g.multiple && <span className="text-[10px] text-muted-foreground">可多选叠加</span>}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {g.options.map(o => {
+                      const active = selArr.includes(o.value);
+                      return (
+                        <button key={o.value} onClick={() => {
+                          const multiple = !!g.multiple;
+                          let nextArr: string[];
+                          if (multiple) nextArr = active ? selArr.filter(x => x !== o.value) : [...selArr, o.value];
+                          else nextArr = active ? [] : [o.value];
+                          const next = { ...modifySel, [g.group]: nextArr };
+                          setModifySel(next);
+                          const np = buildPrompt(next, layoutSel, localCustom);
+                          updateTask(task.id, { prompt: np });
+                          setLocalPrompt(np);
+                        }} className={`px-2 py-1 rounded text-[11px] border transition-colors ${active ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground border-border hover:bg-accent'}`}>
+                          {o.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {task.featureId === 'design-modify' && layoutOptions && layoutOptions.map(g => {
+              const selArr = layoutSel[g.group] || [];
+              return (
+                <div key={g.group}>
+                  <div className="text-xs font-medium text-foreground mb-1 flex items-center justify-between">
+                    <span>📐 {g.group}</span>
+                    {g.multiple && <span className="text-[10px] text-muted-foreground">可多选叠加</span>}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {g.options.map(o => {
+                      const active = selArr.includes(o.value);
+                      return (
+                        <button key={o.value} onClick={() => {
+                          const multiple = !!g.multiple;
+                          let nextArr: string[];
+                          if (multiple) nextArr = active ? selArr.filter(x => x !== o.value) : [...selArr, o.value];
+                          else nextArr = active ? [] : [o.value];
+                          const next = { ...layoutSel, [g.group]: nextArr };
+                          setLayoutSel(next);
+                          const np = buildPrompt(modifySel, next, localCustom);
+                          updateTask(task.id, { prompt: np });
+                          setLocalPrompt(np);
+                        }} className={`px-2 py-1 rounded text-[11px] border transition-colors ${active ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-muted-foreground border-border hover:bg-accent'}`}>
+                          {o.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {(!modifyOptions || modifyOptions.length === 0) && <div className="text-xs text-muted-foreground">暂无可用选项</div>}
+          </div>
+          <DialogFooter>
+            <button onClick={() => setOpenOptionPanel(false)} className="px-3 py-1.5 rounded text-xs border border-border bg-background hover:bg-accent transition-colors">完成</button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 自定义补充提示词（独立输入，提交时合成到完整提示词，与选项分开存储）：自由改款/面料上身/款式上身/AI换背景/平铺生成 */}
+      {(task.featureId && ['design-modify','design-fabric','shoot-tryon','shoot-bg','shoot-flat','shoot-model-swap','shoot-pose'].includes(task.featureId)) && (
         <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-1">
-          <span className="text-[10px] text-muted-foreground block">✍️ 自定义提示词（可选，补充你的改款要求，独立存放不混入选项）</span>
+          <span className="text-[10px] text-muted-foreground block">✍️ 自定义提示词（可选，补充你的额外要求，独立存放不混入预设）</span>
           <Textarea
             value={localCustom}
             onChange={(e) => {
@@ -403,7 +433,21 @@ const TaskPromptCell = memo(function TaskPromptCell({
               updateTask(task.id, { customPrompt: v, prompt: np });
               setLocalPrompt(np);
             }}
-            placeholder="例如：改成方领+泡泡袖，真丝垂坠感，加长及膝…"
+            placeholder={
+              task.featureId === 'design-modify'
+                ? '例如：改成方领+泡泡袖，真丝垂坠感，加长及膝…'
+                : task.featureId === 'design-fabric'
+                ? '例如：面料只替换上装区域，保持廓形与垂坠不变…'
+                : task.featureId === 'shoot-tryon'
+                ? '例如：只换裤子，保留原有鞋子和腰带…'
+                : task.featureId === 'shoot-bg'
+                ? '例如：人物保持站姿，暖色光，景深与图2背景一致…'
+                : task.featureId === 'shoot-model-swap'
+                ? '例如：欧美超模气质，三视角展示，家居实景…'
+                : task.featureId === 'shoot-pose'
+                ? '例如：半身+七分身，动态抓拍，回眸侧脸…'
+                : '例如：保持白底平铺、只出一张完整图不要拼图…'
+            }
             className="min-h-[60px] text-xs resize-none"
           />
         </div>
@@ -504,7 +548,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
         </div>
       )}
       {/* 提示词文本框：服装转3D/衣服去皱/高清放大/服装改色/自由改款 由默认提示词+选项面板驱动，隐藏文本框 */}
-      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'design-upscale' && task.featureId !== 'design-recolor' && task.featureId !== 'design-modify' && (
+      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'design-upscale' && task.featureId !== 'design-recolor' && task.featureId !== 'design-modify' && task.featureId !== 'design-fabric' && task.featureId !== 'shoot-tryon' && task.featureId !== 'shoot-bg' && task.featureId !== 'shoot-flat' && task.featureId !== 'shoot-model-swap' && task.featureId !== 'shoot-pose' && (
         <Textarea
           value={localPrompt}
           onChange={handleChange}
@@ -513,7 +557,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
           className="min-h-[80px] text-xs resize-none"
         />
       )}
-      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'shoot-flat' && task.featureId !== 'design-recolor' && task.featureId !== 'design-upscale' && (
+      {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'shoot-flat' && task.featureId !== 'design-recolor' && task.featureId !== 'design-upscale' && task.featureId !== 'design-fabric' && task.featureId !== 'shoot-tryon' && task.featureId !== 'shoot-bg' && task.featureId !== 'shoot-model-swap' && task.featureId !== 'shoot-pose' && (
       <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-muted-foreground flex items-center gap-1">
@@ -1746,7 +1790,19 @@ export default function TaskTable() {
                         <label className="text-[10px] text-muted-foreground">模型</label>
                         <Select
                           value={activeModels.length > 0 ? task.model : ''}
-                          onValueChange={(v) => updateTask(task.id, { model: v, modelLabel: activeModels.find(m => m.id === v)?.name || v })}
+                          onValueChange={(v) => {
+                            const patch: Partial<ITask> = { model: v, modelLabel: activeModels.find(m => m.id === v)?.name || v };
+                            // AI换背景 + 切到 Gemini/Nano Banana 系模型：自动键入专用换背景提示词，
+                            // 避免通用提示词该模型理解不了（任务：图1背景→图2背景，人物皮肤/背景颜色全保真、禁止偏色）
+                            if (task.featureId === 'shoot-bg' && /nano-banana|gemini/i.test(v)) {
+                              const geminiTpl = getFeatureTemplate(task.featureId)?.tryonTypes?.find(t => t.id === 'gemini');
+                              if (geminiTpl) {
+                                patch.tryonType = 'gemini' as ITask['tryonType'];
+                                patch.prompt = geminiTpl.prompt;
+                              }
+                            }
+                            updateTask(task.id, patch);
+                          }}
                           disabled={activeModels.length === 0}
                         >
                           <SelectTrigger className="h-7 text-xs">

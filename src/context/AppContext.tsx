@@ -15,6 +15,31 @@ import {
   MODEL_QUALITIES,
   MODEL_BACKGROUNDS,
 } from '@/data/models';
+import {
+  parseSizeFromRatio,
+  getRealModelId,
+  matchModelPresetKey,
+  extractModelsFromResponse,
+  extractPaginationInfo,
+  extractModelInfo,
+  matchPresetKeyForModel,
+} from '@/lib/api/modelUtils';
+import {
+  STANDARD_SIZES,
+  findClosestStandardSize,
+  buildBodyVariants,
+  parseErrorDetail,
+  isInvalidRequestError,
+} from '@/lib/api/requestUtils';
+import {
+  compressImage,
+  fileToBase64,
+  getMaskFile,
+  maskDataUrlToFile,
+  getImageNaturalSize,
+  resizeMaskFile,
+  imageUrlToBlob,
+} from '@/lib/api/imageUtils';
 
 // Storage keys
 
@@ -212,20 +237,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const [activeModels, setActiveModelsState] = useState<IModel[]>(() => {
     const cached = safeParse<IModel[]>(scopedStorage.getItem(KEY_ACTIVE_MODELS), []);
-    const mockActive = MOCK_MODELS.filter(m => m.isActive);
+    // 内置模型一律不勾选（默认不激活）：只保留用户自定义(API)模型。
+    // 内置模型随版本更新即时生效，用户无需勾选；如需使用可到 API 页面手动勾选。
     if (cached && Array.isArray(cached) && cached.length > 0) {
-      // 同步内置模型(MOCK, isCustom=false)的最新定义：内置模型随版本更新即时生效，
-      // 用户自定义模型(isCustom=true)原样保留，避免缓存里的旧内置数据掩盖修复/新模型
-      const merged = cached.map(m => {
-        const mock = mockActive.find(mm => mm.id === m.id && !mm.isCustom);
-        return mock ? { ...m, ...mock } : m;
-      });
-      mockActive.forEach(mm => {
-        if (!merged.some(m => m.id === mm.id)) merged.push(mm);
-      });
-      return merged;
+      return cached.filter(m => m.isCustom);
     }
-    return mockActive;
+    return [];
   });
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -529,24 +546,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return fallback || null;
   }, [allModels, apiConfigs]);
 
-  // 从 ratio 字符串中解析宽高，如 "2K · 3:4 竖版 · 1536×2048" → { width: 1536, height: 2048 }
-  const parseSizeFromRatio = (ratioStr: string): { width: number; height: number } => {
-    const match = ratioStr.match(/(\d+)\s*[×xX]\s*(\d+)/);
-    if (match) {
-      return { width: parseInt(match[1], 10), height: parseInt(match[2], 10) };
-    }
-    return { width: 1024, height: 1024 };
-  };
-
-  // 获取真实模型 ID（去掉 api-{type}_ 前缀）
-  // 支持的前缀格式：api-openai_ / api-google_ / api-volcengine_ / api-custom-1_ / api-custom-2_ 等
-  const getRealModelId = (modelId: string): string => {
-    // 通用规则：如果模型ID以 api- 开头且包含下划线，去掉第一个下划线及之前的部分
-    const match = modelId.match(/^api-[^_]+_(.+)$/);
-    if (match) return match[1];
-    return modelId;
-  };
-
 
   // ---- Generate ----
   const generateTask = useCallback(async (taskId: string, append = false) => {
@@ -722,10 +721,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       }
       if (!isAutoSize && isGoogleModel) {
+        // nano-banana/gemini：
+        // ① image_size 档位词 + aspect_ratio → images/generations 文生图（官方推荐，用户验证能出 1K-4K）
+        // ② 同时带 size 像素 → 图生图 generations 端点（v1.3.x 旧版验证能出 4K；中转认 size 像素档位）
         const gm = task.ratio.match(/^(\d+(?:\.\d+)?K)\s*·\s*(\d+:\d+)/);
         if (gm) {
           body.image_size = gm[1];
           body.aspect_ratio = gm[2];
+        }
+        // 附加 size 像素（不覆盖 image_size；二者并存，中转认哪个用哪个）
+        const pm = task.ratio.match(/(\d+)\s*×\s*(\d+)/);
+        if (pm) {
+          body.size = `${pm[1]}x${pm[2]}`;
         }
       }
 
@@ -813,148 +820,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // 色彩保真指令后缀（根据 task.colorLevel/colorScope/colorIntensity 生成）
       let buildColorPreserveSuffix: () => string = () => '';
 
-      // 压缩图片：最长边限制为 maxSize，质量 quality，输出 JPEG
-      const compressImage = async (file: File, maxSize = 2048, quality = 0.85): Promise<File> => {
-        // eslint-disable-next-line no-console
-        logger.info(`${debugPrefix} 🗜️ 开始压缩参考图：原始大小=${(file.size / 1024).toFixed(1)}KB, type=${file.type}`);
-        return new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => {
-            let { width, height } = img;
-            // eslint-disable-next-line no-console
-            logger.info(`${debugPrefix} 🗜️ 原始尺寸: ${width}x${height}`);
-            // 等比缩放
-            const scale = Math.min(1, maxSize / Math.max(width, height));
-            if (scale < 1) {
-              width = Math.round(width * scale);
-              height = Math.round(height * scale);
-            }
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) {
-              // eslint-disable-next-line no-console
-              logger.warn(`${debugPrefix} 🗜️ canvas 不可用，使用原始文件`);
-              resolve(file);
-              return;
-            }
-            ctx.drawImage(img, 0, 0, width, height);
-            canvas.toBlob(
-              (blob) => {
-                if (!blob) {
-                  resolve(file);
-                  return;
-                }
-                const compressedName = file.name.replace(/\.[^.]+$/, '') + '_compressed.jpg';
-                const compressedFile = new File([blob], compressedName, { type: 'image/jpeg' });
-                // eslint-disable-next-line no-console
-                logger.info(`${debugPrefix} 🗜️ 压缩完成: ${width}x${height}, ${(compressedFile.size / 1024).toFixed(1)}KB ` +
-                  `(压缩率 ${((1 - compressedFile.size / file.size) * 100).toFixed(1)}%)`);
-                resolve(compressedFile);
-              },
-              'image/jpeg',
-              quality,
-            );
-          };
-          img.onerror = () => {
-            // eslint-disable-next-line no-console
-            logger.warn(`${debugPrefix} 🗜️ 图片加载失败，使用原始文件`);
-            resolve(file);
-          };
-          img.src = URL.createObjectURL(file);
-        });
-      };
-
-      // File 转 base64 字符串
-      const fileToBase64 = (file: File): Promise<string> => {
-        return new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const result = reader.result as string;
-            resolve(result);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-      };
-
-      // 生成全透明 mask 文件（用于 edits 端点图生图）
-      let maskFileCache: File | null = null;
-      const getMaskFile = async (): Promise<File> => {
-        if (maskFileCache) return maskFileCache;
-        const canvas = document.createElement('canvas');
-        canvas.width = 1;
-        canvas.height = 1;
-        maskFileCache = await new Promise<File>((resolve) => {
-          canvas.toBlob(
-            (blob) => resolve(new File([blob!], 'mask.png', { type: 'image/png' })),
-            'image/png',
-          );
-        });
-        return maskFileCache;
-      };
-
-      // 用户蒙版 dataURL(base64 PNG，白=重绘) -> File
-      const maskDataUrlToFile = async (dataUrl: string): Promise<File> => {
-        const mime = dataUrl.split(';')[0].split(':')[1] || 'image/png';
-        const b64 = dataUrl.split(',')[1];
-        const byteStr = atob(b64);
-        const bytes = new Uint8Array(byteStr.length);
-        for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
-        return new File([bytes], 'user-mask.png', { type: mime });
-      };
-
-      // 读取图片文件的原始宽高
-      const getImageNaturalSize = (file: File): Promise<{ width: number; height: number }> => {
-        return new Promise((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-          img.onerror = () => reject(new Error('图片尺寸读取失败'));
-          img.src = URL.createObjectURL(file);
-        });
-      };
-
-      // 把蒙版缩放为指定尺寸（保持 mask 与 image 严格同尺寸，inpaint 模型必需）
-      const resizeMaskFile = async (file: File, width: number, height: number): Promise<File> => {
-        const img = new Image();
-        await new Promise<void>((resolve, reject) => {
-          img.onload = () => resolve();
-          img.onerror = () => reject(new Error('蒙版图片加载失败'));
-          img.src = URL.createObjectURL(file);
-        });
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return file;
-        ctx.drawImage(img, 0, 0, width, height);
-        return await new Promise<File>((resolve) => {
-          canvas.toBlob(
-            (blob) => resolve(new File([blob!], 'user-mask.png', { type: 'image/png' })),
-            'image/png',
-          );
-        });
-      };
-
-      // 参考图 URL 转 Blob 工具函数
-      const imageUrlToBlob = async (url: string, name: string): Promise<File> => {
-        // eslint-disable-next-line no-console
-        logger.info(`${debugPrefix} 🖼️ 参考图 URL 类型检测:`, { arg0: url.substring(0, 30), arg1: '...' });
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`参考图加载失败(HTTP ${resp.status})，可能是页面刷新后图片链接已过期，请重新上传参考图`);
-        const blob = await resp.blob();
-        if (!blob || blob.size === 0) throw new Error('参考图为空文件，请重新上传');
-        const ext = name.split('.').pop()?.toLowerCase() || 'png';
-        let mime = blob.type;
-        if (!mime || mime === 'application/octet-stream') {
-          mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
-        }
-        const file = new File([blob], name || `reference.${ext}`, { type: mime });
-        // eslint-disable-next-line no-console
-        logger.info(`${debugPrefix} 🖼️ 参考图转换完成:`, { arg0: file.name, arg1: (file.size / 1024).toFixed(1) + 'KB', arg2: file.type });
-        return file;
-      };
+      // 图片处理工具：已移至 src/lib/api/imageUtils.ts（compressImage / fileToBase64 / getMaskFile / maskDataUrlToFile / getImageNaturalSize / resizeMaskFile / imageUrlToBlob）
+      const maskFileCache: { file: File | null } = { file: null };
 
       if (hasReference) {
         const refs = task.referenceImages;
@@ -978,8 +845,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             sortedRefs.map(async (ref, idx) => {
               // eslint-disable-next-line no-console
               logger.info(`${debugPrefix} 参考图[${idx + 1}]: ${ref.name} (${(ref.size / 1024).toFixed(1)}KB, slot=${ref.slot || '无'})`);
-              const rawFile = await imageUrlToBlob(ref.url, ref.name);
-              const compressed = await compressImage(rawFile, 2048, 0.85);
+              const rawFile = await imageUrlToBlob(ref.url, ref.name, debugPrefix);
+              const compressed = await compressImage(rawFile, 2048, 0.85, debugPrefix);
               const b64 = await fileToBase64(compressed);
               return { file: compressed, b64 };
             })
@@ -1196,7 +1063,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // - 火山 Seedream：/images/generations + 顶层 image 数组
           // - Grok：/images/edits JSON images 数组；Wan：多模态 chat
           if (dualIsGoogle) {
-            endpoints.push(buildChatEndpoints()[0]);
+            // Google/Nano Banana：走 generations 端点 + size 像素（旧版 v1.3.x 验证能出 4K；
+            // chat/completions 多模态下中转忽略一切尺寸字段强制 1K）
+            endpoints.push(buildGenEndpoints()[0]);
           } else if (dualIsVolc) {
             endpoints.push(buildGenEndpoints()[0]);
           } else if (dualIsOpenAIImage) {
@@ -1224,8 +1093,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             // OpenAI gpt-image 系：图生图标准端点为 /images/edits
             endpoints.push(buildEditEndpoints()[0]);
           } else if (isChatModel) {
-            // 多模态 chat 模型：chat 端点
-            endpoints.push(buildChatEndpoints()[0]);
+            // 多模态 chat 模型：Grok 走 chat 端点；
+            // Gemini/Nano Banana 图生图改走 generations + size 像素（chat 下中转忽略尺寸强制 1K）
+            const isGeminiLike = presetLower.includes('gemini') || presetLower.includes('nano-banana');
+            if (isGeminiLike) {
+              endpoints.push(buildGenEndpoints()[0]);
+            } else {
+              endpoints.push(buildChatEndpoints()[0]);
+            }
           } else {
             // 其他模型：edits 端点
             endpoints.push(buildEditEndpoints()[0]);
@@ -1411,77 +1286,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return deduped;
       };
 
-      // ===== 标准 OpenAI 尺寸（当 size 不支持时降级使用）=====
-      const STANDARD_SIZES = ['1024x1024', '1024x1792', '1792x1024'];
-
-      // 找最接近的标准尺寸
-      const findClosestStandardSize = (w: number, h: number): string => {
-        const targetRatio = w / h;
-        let best = STANDARD_SIZES[0];
-        let bestDiff = Infinity;
-        for (const sz of STANDARD_SIZES) {
-          const [sw, sh] = sz.split('x').map(Number);
-          const diff = Math.abs(targetRatio - sw / sh);
-          if (diff < bestDiff) { bestDiff = diff; best = sz; }
-        }
-        return best;
-      };
-
-      // ===== 请求体降级阶梯：遇到 invalid_request 时依次去掉多余字段 =====
-      const buildBodyVariants = (base: Record<string, unknown>): Array<{ label: string; body: Record<string, unknown> }> => {
-        const variants: Array<{ label: string; body: Record<string, unknown> }> = [];
-        variants.push({ label: '完整请求体', body: { ...base } });
-
-        // 变体2：去掉 response_format（少数 API 不支持此字段）
-        if ('response_format' in base) {
-          const v = { ...variants[variants.length - 1].body };
-          delete v.response_format;
-          variants.push({ label: '去掉 response_format', body: v });
-        }
-
-        // 变体3：去掉 quality（少数 API 不支持 quality 参数）
-        if ('quality' in base) {
-          const v = { ...variants[variants.length - 1].body };
-          delete v.quality;
-          variants.push({ label: '去掉 quality', body: v });
-        }
-
-        return variants;
-      };
-
+      // ===== 请求体降级阶梯 / 标准尺寸降级：已移至 src/lib/api/requestUtils.ts =====
       const bodyVariants = buildBodyVariants(body);
       // eslint-disable-next-line no-console
       logger.info(`${debugPrefix} 将尝试 ${bodyVariants.length} 种请求体降级方案:`, String(bodyVariants.map(v => v.label)));
-
-      const parseErrorDetail = (responseText: string): { code?: string; message?: string; full: string } => {
-        try {
-          const parsed = JSON.parse(responseText);
-          return {
-            code: parsed?.error?.code || parsed?.code || undefined,
-            message: parsed?.error?.message || parsed?.message || parsed?.error || undefined,
-            full: responseText,
-          };
-        } catch {
-          return { full: responseText };
-        }
-      };
-
-      const isInvalidRequestError = (status: number, errInfo: ReturnType<typeof parseErrorDetail>): boolean => {
-        if (errInfo.code === 'invalid_request') return true;
-        if (errInfo.code === 'invalid_parameter') return true;
-        if (errInfo.code === 'bad_request') return true;
-        if (status === 400 || status === 422) return true;
-        if (status === 503 && (errInfo.code === 'invalid_request' || (errInfo.message && String(errInfo.message).toLowerCase().includes('invalid')))) {
-          return true;
-        }
-        const lowerFull = errInfo.full.toLowerCase();
-        if (lowerFull.includes('invalid_request')) return true;
-        if (lowerFull.includes('invalid size')) return true;
-        if (lowerFull.includes('unsupported size')) return true;
-        if (lowerFull.includes('size must be')) return true;
-        if (lowerFull.includes('invalid parameter')) return true;
-        return false;
-      };
 
       let endpointSucceeded = false;
 
@@ -1560,16 +1368,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               }
 
               if (useCacheStrategy && cachedStrategy) {
-                // 只尝试缓存的那一种策略
-                attempts.push({
-                  label: `缓存策略: ${cachedStrategy.endpointType}/${cachedStrategy.format} field=${cachedStrategy.fieldName}`,
-                  mode: cachedStrategy.endpointType + '-' + cachedStrategy.format,
-                  format: cachedStrategy.format === 'json' || cachedStrategy.format === 'chat'
-                    ? cachedStrategy.format
-                    : 'formdata',
-                  fieldName: cachedStrategy.fieldName,
-                  extraParams: cachedStrategy.extraParams || {},
-                });
+                // chat 模型（nano-banana/gemini/grok）图生图必须用 messages 多模态；
+                // 历史缓存的 chat/json（顶层 prompt + image_url + response_format）不适配服务端，强制转 chat 多模态
+                const chatPresetLower = String(matchModelPresetKey(task.model) || '').toLowerCase();
+                const isChatModelPreset = chatPresetLower.includes('gemini') || chatPresetLower.includes('nano-banana') || chatPresetLower.includes('grok');
+                if (isChatModelPreset && (cachedStrategy.endpointType || '').includes('chat')) {
+                  attempts.push({
+                    label: `缓存策略: chat多模态(messages, field=${cachedStrategy.fieldName})`,
+                    mode: 'chat',
+                    format: 'chat',
+                    fieldName: cachedStrategy.fieldName,
+                    extraParams: cachedStrategy.extraParams || {},
+                  });
+                } else {
+                  // 只尝试缓存的那一种策略
+                  attempts.push({
+                    label: `缓存策略: ${cachedStrategy.endpointType}/${cachedStrategy.format} field=${cachedStrategy.fieldName}`,
+                    mode: cachedStrategy.endpointType + '-' + cachedStrategy.format,
+                    format: cachedStrategy.format === 'json' || cachedStrategy.format === 'chat'
+                      ? cachedStrategy.format
+                      : 'formdata',
+                    fieldName: cachedStrategy.fieldName,
+                    extraParams: cachedStrategy.extraParams || {},
+                  });
+                }
               } else if (isChatEndpoint && imageEditBase64List.length > 0) {
                 // ====== chat/completions 多模态方式（多张参考图按顺序作为image_url content块）======
                 attempts.push({
@@ -1766,10 +1588,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                         chatContent.push({ type: 'image_url', image_url: { url: b64 } });
                       });
                     }
-                    const chatBody = {
+                    const chatBody: Record<string, unknown> = {
                       model: variant.body.model,
                       n: variant.body.n || 1,
-                      size: variant.body.size,
                       messages: [
                         {
                           role: 'user',
@@ -1777,6 +1598,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                         },
                       ],
                     };
+                    // nano-banana/gemini 图生图（OpenAI 兼容 chat/completions 多模态）：
+                    // 实测结论（2026-10-12，用户 API 后台对照）：
+                    // ① 只发顶层 image_size/aspect_ratio：中转能记录显示"大小3584x4800"，但转发给上游
+                    //    Gemini 时被静默忽略（chat 端点非标准字段）→ 结果仍是 1K。
+                    // ② Gemini 原生尺寸参数是 generationConfig.imageConfig.imageSize+aspectRatio，
+                    //    OpenAI 兼容层通过 extra_body.generation_config.image_config 传递（官方文档）。
+                    // 因此：三层全发（generationConfig 原生 + extra_body 兼容层 + 顶层 image_size 兜底），
+                    // 中转认哪个用哪个；未识别字段会被静默忽略，不报错。
+                    // 文生图走 images 接口，仍只用顶层 image_size 档位词，不受影响。
+                    if (variant.body.image_size) {
+                      const imgSize = variant.body.image_size;
+                      const ratio = variant.body.aspect_ratio;
+                      chatBody.image_size = imgSize;
+                      if (ratio) chatBody.aspect_ratio = ratio;
+                      // ① Gemini 原生 generateContent 结构（多个中转文档确认）
+                      chatBody.generationConfig = {
+                        imageConfig: {
+                          imageSize: imgSize,
+                          ...(ratio ? { aspectRatio: ratio } : {}),
+                        },
+                      };
+                      // ② Google 官方 OpenAI 兼容层：extra_body.generation_config.image_config
+                      chatBody.extra_body = {
+                        generation_config: {
+                          image_config: {
+                            image_size: imgSize,
+                            ...(ratio ? { aspect_ratio: ratio } : {}),
+                          },
+                        },
+                      };
+                    } else if (variant.body.size) {
+                      chatBody.size = variant.body.size;
+                    }
+                    // 诊断：确认尺寸参数是否真正进入 chat body（不被 300 字符截断隐藏）
+                    // eslint-disable-next-line no-console
+                    logger.info(`${debugPrefix}   chat body 尺寸参数: model=${String(chatBody.model)} image_size=${JSON.stringify(chatBody.image_size)} aspect_ratio=${JSON.stringify(chatBody.aspect_ratio)} size=${JSON.stringify(chatBody.size)} generationConfig=${JSON.stringify(chatBody.generationConfig)} extra_body=${JSON.stringify(chatBody.extra_body)} contentBlocks=${Array.isArray((chatBody.messages as any)?.[0]?.content) ? (chatBody.messages as any)[0].content.length : 0}`);
                     requestHeaders['Content-Type'] = 'application/json';
                     // eslint-disable-next-line no-console
                     logger.info(`${debugPrefix}   chat/completions body:`, String(JSON.stringify(chatBody).slice(0, 300) + '...'));
@@ -2382,7 +2239,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 // 多图时不追加 images[0]/image_0 等冗余字段，避免后端解析错误
                 // edits 端点加 mask（全透明）
                 if (extraParams.__useMask === 'true') {
-                  const mask = await getMaskFile();
+                  const mask = await getMaskFile(maskFileCache);
                   fd.append('mask', mask, mask.name);
                 }
                 if (!isVarEndpoint) {
@@ -2832,63 +2689,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveModelsState(models);
   }, []);
 
-  // 按模型名称模糊匹配对应的预设参数 key（支持带 api-{type}_ 前缀的 ID）
-  function matchModelPresetKey(modelIdOrName: string): string | null {
-    const lower = modelIdOrName.toLowerCase().replace(/_/g, '-');
-    // 精确匹配：先尝试去掉 api-{provider}- 前缀（三段格式）
-    // 如果 MODEL_RESOLUTIONS 中没有，再尝试去掉 api-{provider}-{id}- 前缀（四段格式）
-    let baseId = lower;
-    // 先尝试三段格式：api-{provider}-{model} → {model}
-    const match2 = lower.match(/^api-[^-]+-(.+)$/);
-    if (match2) {
-      baseId = match2[1];
-      // 如果三段格式的结果在 MODEL_RESOLUTIONS 中，直接返回
-      if (MODEL_RESOLUTIONS[baseId]) return baseId;
-      // 如果不在，再尝试四段格式：api-{provider}-{id}-{model} → {model}
-      const match3 = lower.match(/^api-[^-]+-[^-]+-(.+)$/);
-      if (match3) {
-        baseId = match3[1];
-        if (MODEL_RESOLUTIONS[baseId]) return baseId;
-      }
-    }
-    if (MODEL_RESOLUTIONS[lower]) return lower;
-    // 模糊匹配 —— 更具体的放前面
-    if (lower.includes('seedream-v5-pro') || lower.includes('seedream-v5-flash') || lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5-pro')) return 'seedream-5.0-pro';
-    if (lower.includes('seedream-v5-lite') || lower.includes('seedream-5.0-lite') || lower.includes('seedream-5-lite') || lower.includes('seedream5-lite')) return 'seedream-5.0-lite';
-    if (lower.includes('seedream')) return 'seedream-5.0-lite';
-    if (lower.includes('qwen-image-3') || lower.includes('qwen-image3') || lower.includes('qwen-image-3.0')) return 'qwen-image-3';
-    if (lower.includes('qwen-image')) return 'qwen-image-3';
-    if (lower.includes('gemini-3.1-pro') || lower.includes('gemini-3-pro') || lower.includes('gemini3pro')) return 'gemini-3.1-pro-image';
-    if (lower.includes('gemini-3.1-flash') || lower.includes('gemini-3-flash') || lower.includes('gemini3flash')) return 'nano-banana-2';
-    if (lower.includes('nano-banana') || lower.includes('nanobanana') || lower.includes('爆炸香蕉')) return 'nano-banana-2';
-    if (lower.includes('gemini')) return 'nano-banana-2';
-    // GPT-Image 2.5 系列（更精确的匹配放前面）
-    // GPT-Image 2.5 系列（更精确的匹配放前面）
-    if (lower.includes('gpt-image-2.5-flare') || lower.includes('gpt-image-2-5-flare') || lower.includes('2.5-flare')) return 'gpt-image-2.5-flare';
-    if (lower.includes('gpt-image-2.5-sunburst') || lower.includes('gpt-image-2-5-sunburst') || lower.includes('2.5-sunburst')) return 'gpt-image-2.5-sunburst';
-    if (lower.includes('gpt-image-2.5') || lower.includes('gpt-image-2-5')) return 'gpt-image-2.5-flare';
-    if (lower.includes('gpt-image')) return 'gpt-image-2';
-    if (lower.includes('jimeng') || lower.includes('ji-meng') || lower.includes('即梦')) return 'jimeng-5.0';
-    if (lower.includes('flux-1.1-pro') || lower.includes('flux-1-1-pro') || lower.includes('flux1.1pro')) return 'flux-1.1-pro';
-    // FLUX.2 新一代（flux-2-* / flux2-*），分辨率更高，须在 flux-1-dev 前匹配
-    if (lower.includes('flux-2-') || lower.includes('flux-2.') || lower.includes('flux2') || lower.includes('flux-2')) return 'flux-2';
-    if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
-    if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
-    // Inpaint 局部重绘模型（支持蒙版）
-    if (lower.includes('flux-kontext') || lower.includes('flux-context') || lower.includes('kontext') || lower.includes('context')) return 'flux-kontext';
-    if (lower.includes('inpaint')) return 'mj-inpaint';
-    if (lower.includes('flux')) return 'flux-1.1-pro';
-    // Wan 2.7 系列
-    if (lower.includes('wan-2.7-global-i2i-pro') || lower.includes('wan2.7-i2i-pro')) return 'wan-2.7-global-i2i-pro';
-    if (lower.includes('wan-2.7-global-i2i') || lower.includes('wan2.7-i2i')) return 'wan-2.7-global-i2i';
-    if (lower.includes('wan-2.7-global-t2i') || lower.includes('wan2.7-t2i')) return 'wan-2.7-global-t2i';
-    if (lower.includes('wan')) return 'wan-2.7-global-i2i';
-    // Grok Imagine 系列
-    if (lower.includes('grok-imagine-image-2.0') || lower.includes('grok-imagine-2') || lower.includes('grok2')) return 'grok-imagine-image-2.0';
-    if (lower.includes('grok-imagine') || lower.includes('grok')) return 'grok-imagine-image-2.0';
-    return null;
-  }
-
   const getResolutionsForModel = useCallback((modelId: string) => {
     // 视频模型：返回视频比例（16:9 / 9:16 / 1:1）
     if (modelId.startsWith('kling') || modelId.includes('seedance')) {
@@ -2930,80 +2730,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const updateApiConfig = useCallback((id: string, updates: Partial<IApiConfig>) => {
     setApiConfigsState(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
   }, []);
-
-  // 递归从响应数据中提取模型数组（支持多种 OpenAI 兼容格式）
-  function extractModelsFromResponse(data: unknown): any[] {
-    if (!data) return [];
-    // 直接是数组
-    if (Array.isArray(data)) return data;
-    if (typeof data !== 'object') return [];
-
-    const obj = data as Record<string, unknown>;
-    // 常见字段名
-    const candidates = ['data', 'models', 'model_list', 'list', 'items', 'result', 'data.data'];
-    for (const key of candidates) {
-      if (Array.isArray(obj[key])) return obj[key] as any[];
-    }
-    // data 是对象再往下找一层
-    if (obj.data && typeof obj.data === 'object') {
-      const nested = extractModelsFromResponse(obj.data);
-      if (nested.length > 0) return nested;
-    }
-    // 兜底：返回对象中第一个数组
-    for (const key of Object.keys(obj)) {
-      if (Array.isArray(obj[key])) return obj[key] as any[];
-    }
-    return [];
-  }
-
-  // 从响应中提取分页信息
-  function extractPaginationInfo(data: unknown): { hasMore: boolean; nextPage?: string | number | null; total?: number } {
-    if (!data || typeof data !== 'object') return { hasMore: false };
-    const obj = data as Record<string, unknown>;
-    const hasMore = Boolean(
-      obj.has_more ?? obj.hasMore ?? obj.hasNext ?? obj.has_next ?? false,
-    );
-    const nextPage = (obj.next_page ?? obj.nextPage ?? obj.after ?? obj.nextCursor ?? obj.page_token) as string | number | null | undefined;
-    const total = typeof obj.total === 'number' ? obj.total : typeof obj.total_count === 'number' ? obj.total_count : undefined;
-    return { hasMore, nextPage, total };
-  }
-
-  // 从模型项中提取 id 和 name（兼容多种字段格式）
-  function extractModelInfo(item: any): { id: string; name: string } | null {
-    if (!item || typeof item !== 'object') return null;
-    const id = String(item.id ?? item.model ?? item.model_id ?? item.modelId ?? '').trim();
-    if (!id) return null;
-    const name = String(item.name ?? item.model_name ?? item.display_name ?? item.displayName ?? id).trim();
-    return { id, name };
-  }
-
-  // 按模型名称/ID 模糊匹配内置预设 key
-  function matchPresetKeyForModel(modelId: string, modelName: string): string {
-    const lower = `${modelId} ${modelName}`.toLowerCase().replace(/_/g, '-');
-    if (MODEL_RESOLUTIONS[modelId]) return modelId;
-    // 更具体的放前面
-    if (lower.includes('seedream-v5-pro') || lower.includes('seedream-v5-flash') || lower.includes('seedream-5.0-pro') || lower.includes('seedream-5-pro') || lower.includes('seedream5-pro')) return 'seedream-5.0-pro';
-    if (lower.includes('seedream-v5-lite') || lower.includes('seedream-5.0-lite') || lower.includes('seedream-5-lite') || lower.includes('seedream5-lite')) return 'seedream-5.0-lite';
-    if (lower.includes('seedream')) return 'seedream-5.0-lite';
-    if (lower.includes('qwen-image-3') || lower.includes('qwen-image3') || lower.includes('qwen-image-3.0')) return 'qwen-image-3';
-    if (lower.includes('qwen-image')) return 'qwen-image-3';
-    if (lower.includes('gemini-3.1-pro') || lower.includes('gemini-3-pro')) return 'gemini-3.1-pro-image';
-    if (lower.includes('gemini-3.1-flash') || lower.includes('gemini-3-flash')) return 'nano-banana-2';
-    if (lower.includes('nano-banana') || lower.includes('nanobanana') || lower.includes('爆炸香蕉')) return 'nano-banana-2';
-    if (lower.includes('gemini')) return 'nano-banana-2';
-    if (lower.includes('gpt-image')) return 'gpt-image-2';
-    if (lower.includes('jimeng') || lower.includes('ji-meng') || lower.includes('即梦')) return 'jimeng-5.0';
-    if (lower.includes('flux-1-1-pro') || lower.includes('flux-1.1-pro') || lower.includes('flux1.1pro')) return 'flux-1.1-pro';
-    // FLUX.2 新一代（flux-2-* / flux2-*），分辨率更高，须在 flux-1-dev 前匹配
-    if (lower.includes('flux-2-') || lower.includes('flux-2.') || lower.includes('flux2') || lower.includes('flux-2')) return 'flux-2';
-    if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
-    if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
-    // Inpaint 局部重绘模型（支持蒙版）
-    if (lower.includes('flux-kontext') || lower.includes('flux-context') || lower.includes('kontext') || lower.includes('context')) return 'flux-kontext';
-    if (lower.includes('inpaint')) return 'mj-inpaint';
-    if (lower.includes('flux')) return 'flux-1.1-pro';
-    return 'flux-1.1-pro';
-  }
 
   // 真实请求 API 拉取模型列表（支持分页 + 多格式解析）
   const fetchModelsFromApi = useCallback(async (
