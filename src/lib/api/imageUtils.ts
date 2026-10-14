@@ -137,3 +137,49 @@ export const imageUrlToBlob = async (url: string, name: string, logPrefix = ''):
   logger.info(`${logPrefix} 🖼️ 参考图转换完成:`, { arg0: file.name, arg1: (file.size / 1024).toFixed(1) + 'KB', arg2: file.type });
   return file;
 };
+
+/**
+ * 把两张 base64 参考图合成一张竖版单图（上=第一张、下=第二张）。
+ * 用途：gemini/nano-banana 双槽款式上身走 generations 端点时，中转只认单图字段（images 数组被忽略、丢图2），
+ * 因此把「款式图(上)+模特图(下)」拼成单图上传，保证两张图都到达上游且 generations 单图可出 2K/4K。
+ * @param b64List [款式图, 模特图]
+ * @param maxWidth 合成画布宽（两图等比缩放到此宽度再上下堆叠）
+ * @returns 合成后 JPEG 的 base64 dataURL；任一步失败返回 null（调用方回退原逻辑）
+ */
+export const composeTwoImagesToSingle = async (b64List: string[], maxWidth = 768, logPrefix = ''): Promise<string | null> => {
+  try {
+    const load = (src: string): Promise<HTMLImageElement> =>
+      new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('image load failed'));
+        img.src = src;
+      });
+    const imgs = await Promise.all(b64List.slice(0, 2).map(load));
+    // 等比缩放到 maxWidth，保持各自比例
+    const scaled = imgs.map((img) => {
+      const ratio = maxWidth / img.naturalWidth;
+      return { w: maxWidth, h: Math.round(img.naturalHeight * ratio) };
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = maxWidth;
+    canvas.height = scaled.reduce((s, r) => s + r.h, 0);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    // 白底，避免透明 PNG 拼接出现黑块
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    let y = 0;
+    imgs.forEach((img, i) => {
+      ctx.drawImage(img, 0, y, scaled[i].w, scaled[i].h);
+      y += scaled[i].h;
+    });
+    logger.info(`${logPrefix} 🧩 双槽拼图合成: 画布=${canvas.width}x${canvas.height}`);
+    return await new Promise<string>((resolve) => {
+      canvas.toDataURL('image/jpeg', 0.92).length ? resolve(canvas.toDataURL('image/jpeg', 0.92)) : resolve(canvas.toDataURL('image/png'));
+    });
+  } catch (e) {
+    logger.warn(`${logPrefix} 🧩 双槽拼图失败，回退原始逻辑:`, e);
+    return null;
+  }
+};

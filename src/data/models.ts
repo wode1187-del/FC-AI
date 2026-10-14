@@ -734,6 +734,18 @@ export const MODEL_RESOLUTIONS: Record<string, string[]> = {
     '1K · 9:16 竖屏 · 832×1216',
     '1K · 16:9 宽屏 · 1216×832',
     ],
+  'doubao-seededit-3.0-i2i': [
+    '1K · 1:1 正方形 · 1024×1024',
+    '1K · 3:4 竖版 · 768×1024',
+    '1K · 4:3 横版 · 1024×768',
+    '1K · 9:16 竖屏 · 832×1216',
+    '1K · 16:9 宽屏 · 1216×832',
+    '2K · 1:1 正方形 · 2048×2048',
+    '2K · 3:4 竖版 · 1536×2048',
+    '2K · 4:3 横版 · 2048×1536',
+    '2K · 9:16 竖屏 · 1664×2496',
+    '2K · 16:9 宽屏 · 2848×1600',
+    ],
   'flux-2': [
     '1K · 1:1 正方形 · 1024×1024',
     '1K · 3:4 竖版 · 768×1024',
@@ -846,6 +858,13 @@ export const MODEL_RESOLUTIONS: Record<string, string[]> = {
     '2K · 3:2 经典 · 2496×1664',
     '2K · 2:3 竖版经典 · 1664×2496',
     '2K · 21:9 超宽 · 3136×1344',
+    '4K · 1:1 正方形 · 4096×4096',
+    '4K · 3:4 竖版 · 3520×4704',
+    '4K · 4:3 横版 · 4704×3520',
+    '4K · 16:9 宽屏 · 5504×3040',
+    '4K · 9:16 竖屏 · 3040×5504',
+    '4K · 3:2 经典 · 4992×3328',
+    '4K · 2:3 竖版经典 · 3328×4992',
   ],
 };
 export function getResolutionGroups(resolutions: string[]): { label: string; items: string[] }[] {
@@ -946,6 +965,9 @@ export const MODEL_QUALITIES: Record<string, string[]> = {
   'mj-inpaint': [
     'Standard',
     'High',
+    ],
+  'doubao-seededit-3.0-i2i': [
+    'Standard（官方默认）',
     ],
   'gemini-3.1-pro-image': [
     'PNG 无损（推荐）',

@@ -56,3 +56,7 @@ __fcai_bak_tmp
 # Project backups
 backups
 
+
+# API 测试脚本（含密钥，禁止提交）
+_inpaint_test/
+

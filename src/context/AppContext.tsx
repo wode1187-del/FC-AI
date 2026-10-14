@@ -39,6 +39,7 @@ import {
   getImageNaturalSize,
   resizeMaskFile,
   imageUrlToBlob,
+  composeTwoImagesToSingle,
 } from '@/lib/api/imageUtils';
 
 // Storage keys
@@ -557,13 +558,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 不支持一次返回多张的模型，强制 n=1，避免自动补齐多次请求重复扣费
     const modelLower = task.model.toLowerCase();
     const supportsBatch = modelLower.includes('gpt-image'); // 仅 gpt-image 系列官方支持 n>1
-    const actualRequestedCount = supportsBatch ? (append ? appendCount : (task.imageCount || 1)) : 1;
+    // gemini/nano-banana 款式上身双槽：generations 单图每次只出 1 张，用"补齐循环逐张(n=1)补足"支持多张。
+    // 若不纳入多张支持：body 会发 n=2 被上游按 2 扣费、却只回 1 张（扣费与结果不一致）。
+    const isGeminiTryonMulti = task.featureId === 'shoot-tryon' &&
+      (modelLower.includes('nano-banana') || modelLower.includes('gemini')) &&
+      (task.imageCount || 1) > 1;
+    const multiEnabled = supportsBatch || isGeminiTryonMulti;
+    const actualRequestedCount = multiEnabled ? (append ? appendCount : (task.imageCount || 1)) : 1;
     const requestedCount = actualRequestedCount;
     // 移除背景（本地 RMBG 逐张抠图）：占位张数按参考图数量显示，而非 imageCount
     const isLocalRemoveBg = task.featureId === 'design-remove-bg';
     const totalImageCount = isLocalRemoveBg
       ? (task.referenceImages?.length || 1)
-      : (supportsBatch ? (append ? task.results.length + appendCount : (task.imageCount || 1)) : (append ? task.results.length + 1 : 1));
+      : (multiEnabled ? (append ? task.results.length + appendCount : (task.imageCount || 1)) : (append ? task.results.length + 1 : 1));
 
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'generating', imageCount: totalImageCount, errorMsg: undefined, startedAt: Date.now(), completedAt: undefined, durationMs: undefined } : t));
 
@@ -696,9 +703,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const presetKey = matchModelPresetKey(task.model);
       const isGoogleModel = presetKey?.startsWith('nano-banana') || presetKey?.startsWith('gemini');
-      // Inpaint 局部重绘模型（FLUX Kontext / MJ inpaint）：官方 edits 只认 image+mask+prompt，
+      // Inpaint 局部重绘模型（FLUX Kontext / MJ inpaint / 豆包 SeedEdit）：官方 edits 只认 image+mask+prompt，
       // 不传 n / size / response_format / negative_prompt / strength，避免服务器拒绝或断连
-      const isInpaintModel = presetKey === 'flux-kontext' || presetKey === 'mj-inpaint';
+      const isInpaintModel = presetKey === 'flux-kontext' || presetKey === 'mj-inpaint' || presetKey === 'doubao-seededit-3.0-i2i';
 
       // 构造请求体（OpenAI 兼容格式）
       const body: Record<string, unknown> = {
@@ -716,6 +723,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // Wan 2.7 官方推荐缩写档位 1K/2K/4K（T2I 可 4K，I2I 最高 2K）
           const wm = task.ratio.match(/^(\d+(?:\.\d+)?K)/);
           if (wm) body.size = wm[1];
+        } else if (presetKey?.startsWith('seedream') || presetKey?.startsWith('jimeng')) {
+          // 火山 Seedream/即梦：官方 GenerateImages 用档位词 size(1K/2K/4K) + aspect_ratio，
+          // 中转不认纯像素 size（如 3520x4704 会被降档为 2048x2048），必须发档位词 + 比例
+          const sm = task.ratio.match(/^(\d+(?:\.\d+)?K)/);
+          if (sm) body.size = sm[1];
+          const ar = task.ratio.match(/(\d+):(\d+)/);
+          if (ar) body.aspect_ratio = `${ar[1]}:${ar[2]}`;
         } else {
           body.size = sizeStr;
         }
@@ -932,6 +946,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             if (dualIsGrok) {
               return `[<IMAGE_0>=${t.itemLabel}，<IMAGE_1>=模特照片（底图）。以 <IMAGE_1> 为底图，严格保持其模特的面部、五官、发型、身材、姿势、肤色与拍摄场景、灯光完全不变，不得更换模特或重新生成人物；仅将 <IMAGE_0> 中的${t.item}（颜色、图案、材质、版型）${t.action} <IMAGE_1> 模特身上，自然贴合垂坠，光影与 <IMAGE_1> 一致。]\n\n用户提示词：`;
             }
+            // Gemini/Nano Banana：多模态对话模型，需要比 gpt 更明确、结构化的指令，否则会自行重绘/改色/换人
+            if (dualIsGoogle) {
+              return `这是一张"图1（${t.itemLabel}）"和一张"图2（模特照片底图）"。你的任务只有一个：把图1中的${t.item}${t.action}图2的模特身上，然后原样输出图2这张模特照片，只改变他身上的这一件${t.item}。
+
+必须做到：
+1. 以图2为底图，图2模特的每一处都原样保留：面部五官、发型、身材、姿势、肤色、皮肤颜色、手上动作、鞋、以及背景、场景、光线、色调，全部一个像素都不要改。
+2. 图2模特的皮肤颜色必须与图2完全一致，禁止偏色、禁止泛红、禁止变色。
+3. 背景的颜色和光影必须与图2完全一致，禁止改背景、禁止给背景换色、禁止添加新背景元素。
+4. 只把图1里那件${t.item}的颜色、图案、材质、版型照搬穿到图2模特对应部位，衣服要自然贴合身体、垂坠自然、褶皱和光影跟随身体。
+5. 这是换装，不是重绘。禁止把图2模特画成另一个人、禁止换脸、禁止改变身材、禁止给皮肤上色、禁止调整整体色调。
+
+最终只输出图2被换上图1衣服后的这一张完整照片。`;
+            }
             return `[参考图1=${t.itemLabel}，参考图2=模特底图。以参考图2为底图，保持参考图2模特的面部、五官、发型、身材、姿势、肤色与场景背景、灯光完全不变，不得更换模特或重新生成人物；仅将参考图1中的${t.item}（颜色、图案、材质、版型）${t.action}参考图2模特身上，保持细节不变，自然贴合垂坠，光影与参考图2一致。]\n\n用户提示词：`;
           };
 
@@ -942,6 +969,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             const scope = task.colorScope || [];
             const intensity = task.colorIntensity ?? 75;
             const levelText = level === 'ultra' ? '极致还原' : level === 'high' ? '高保真' : '标准';
+            // 换背景场景（图1=人物原图，图2=背景图）：色彩保真文案必须围绕"人物参照图1、背景参照图2"编写，
+            // 避免通用文案（"肤色与参考图2一致"）误导模型把背景图当主体重绘
+            if (isBgSwap) {
+              const bgScopeMap: Record<string, string> = {
+                clothes: '保持图1人物所穿服装的颜色、图案、材质完全不变，禁止偏色、变色、褪色',
+                skin: '保持图1人物肤色自然真实，与图1原图完全一致，禁止偏色、过曝、苍白、泛红',
+                bg: '保持图2背景的颜色、色调、明暗与图2原图完全一致，禁止偏色、变色',
+                light: '保持图1原拍摄光线色温，禁止色温漂移、过度偏暖或偏冷',
+                wb: '白平衡中性准确，禁止色偏、滤镜色、饱和度异常',
+                nored: '禁止整体偏红、泛红、红色色温漂移、面部潮红，保持中性白平衡，画面不得偏暖红',
+              };
+              const bgParts: string[] = [];
+              if (scope.length > 0) {
+                scope.forEach(s => { if (bgScopeMap[s]) bgParts.push(bgScopeMap[s]); });
+              } else {
+                bgParts.push(bgScopeMap.skin!, bgScopeMap.bg!);
+              }
+              if (bgParts.length === 0) return '';
+              return `\n\n【色彩保真·${levelText}】${bgParts.join('；')}。整体色彩还原度${intensity}%，禁止色彩漂移、滤镜化。`;
+            }
             const scopeMap: Record<string, string> = {
               clothes: '严格保持参考图1服装的原始颜色、色相、饱和度、明度完全不变，禁止偏红、偏黄、偏绿、偏蓝、褪色、变色、色偏',
               skin: '模特肤色保持自然真实，与参考图2一致，禁止偏色、过曝、苍白、色偏',
@@ -1063,8 +1110,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // - 火山 Seedream：/images/generations + 顶层 image 数组
           // - Grok：/images/edits JSON images 数组；Wan：多模态 chat
           if (dualIsGoogle) {
-            // Google/Nano Banana：走 generations 端点 + size 像素（旧版 v1.3.x 验证能出 4K；
-            // chat/completions 多模态下中转忽略一切尺寸字段强制 1K）
+            // Google/Nano Banana：走 generations 端点 + size 像素（2026-10-12 备份 5c7df2b 用户确认能出 2K/4K）。
+            // 注意：chat/completions 多模态下该中转忽略一切尺寸字段、强制输出 1K(896×1200)，故不能用 chat。
+            // 双槽 generations 多图 images 数组能将图1款式+图2模特都传给上游（昨天实测结果正确）。
             endpoints.push(buildGenEndpoints()[0]);
           } else if (dualIsVolc) {
             endpoints.push(buildGenEndpoints()[0]);
@@ -1086,6 +1134,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const presetLower = (presetKeyForEndpoint || '').toLowerCase();
           const isGptImage = presetLower.includes('gpt-image');
           const isChatModel = presetLower.includes('grok') || presetLower.includes('gemini') || presetLower.includes('nano-banana');
+          // 火山即梦/Seedream 系（jimeng-5.0 / seedream-5.0-*）：官方图生图为 /images/generations（GenerateImages），
+          // size 支持 2K/4K 像素。edits 端点不识别 4K 像素，会把尺寸降档（如 3520×4704 被降为 2048×2048 1:1）。
+          const isVolcImage = presetLower.includes('jimeng') || presetLower.includes('seedream');
           if (isDualSlotTryon) {
             // 双槽功能（换脸/款式上身/换背景）：只试首选端点一个URL，避免多端点探测扣费
             endpoints.push(buildEditEndpoints()[0]);
@@ -1101,6 +1152,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             } else {
               endpoints.push(buildChatEndpoints()[0]);
             }
+          } else if (isVolcImage) {
+            // 火山即梦/Seedream：走 generations 端点 + size 像素（支持 2K/4K，不降档）
+            endpoints.push(buildGenEndpoints()[0]);
           } else {
             // 其他模型：edits 端点
             endpoints.push(buildEditEndpoints()[0]);
@@ -1124,6 +1178,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       // ===== 成功配置缓存：有缓存时直接用，跳过端点和变体探测 =====
       // 按图生图 / 文生图分别缓存，避免互相混淆
+      // 改色+用户蒙版：mask 仅在 edits 端点支持（generations 不支持 mask 且大 base64 易触发服务端断连），
+      // 必须强制走 edits，禁用一切端点/策略缓存，否则蒙版失效并可能重复扣费
+      const forceEditsForMask = task.featureId === 'design-recolor' && task.maskEnabled && !!task.maskDataUrl;
       const cacheEndpointKey = isImageEditMode ? 'cachedImageEndpoint' : 'cachedTextEndpoint';
       const cacheFailuresKey = isImageEditMode ? 'cachedImageEndpointFailures' : 'cachedTextEndpointFailures';
       const cachedEndpointUrl = isImageEditMode ? apiConfig.cachedImageEndpoint : apiConfig.cachedTextEndpoint;
@@ -1131,8 +1188,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const hasEndpointCache = !!cachedEndpointUrl && cachedFailures < 2;
 
       const effectiveEndpoints: string[] = [];
-      // 双槽款式上身：跳过单图端点缓存，强制按双图策略探测，避免单图成功形状与双图不匹配
-      if (!isDualSlotTryon && hasEndpointCache && cachedEndpointUrl) {
+      // 双槽款式上身 / 改色带蒙版：跳过单图端点缓存，强制按双图/蒙版策略走 edits，
+      // 避免单图成功形状与双图/mask 不匹配、或缓存把蒙版带到不支持的 generations
+      if (!isDualSlotTryon && !forceEditsForMask && hasEndpointCache && cachedEndpointUrl) {
         // 端点规范化：旧版本可能缓存了单数 /images/edit，自动转为复数 /images/edits
         let normalizedEndpoint = cachedEndpointUrl;
         if (normalizedEndpoint.endsWith('/images/edit') && !normalizedEndpoint.endsWith('/images/edits')) {
@@ -1351,8 +1409,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
               // 如果有缓存且命中当前端点类型，直接用缓存策略（只尝试1种，加速）
               // 双槽款式上身：跳过策略缓存，按家族原生双图形状重新探测（单图成功形状≠双图形状）
+              // 改色带蒙版：mask 只在 edits 支持，跳过策略缓存强制走 edits
               let useCacheStrategy = false;
-              if (!isDualSlotTryon && hasValidCache && cachedStrategy) {
+              if (!isDualSlotTryon && !forceEditsForMask && hasValidCache && cachedStrategy) {
                 const cacheEndpointType = cachedStrategy.endpointType;
                 if (
                   (cacheEndpointType === 'generations' && isGenEndpoint) ||
@@ -1530,11 +1589,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     let promptText = String(variant.body.prompt || '');
                     // 双槽：用 slot 感知指令；否则维持原有泛化编号
                     const dualInstr = buildDualSlotInstruction();
-                    if (dualInstr) {
-                      promptText = dualInstr + promptText;
+                    // 款式上身（shoot-tryon）双槽按模型取独立提示词：gpt 用 gptPrompt、gemini 用 geminiPrompt，
+                    // 彻底分离不混用（gemini 需结构化强指令防重绘，gpt 简洁即可）
+                    if (isDualSlotTryon && task.featureId === 'shoot-tryon') {
+                      const tt = getFeatureTemplate(task.featureId)?.tryonTypes?.find(x => x.id === (task.tryonType || 'clothes'));
+                      if (tt) {
+                        if (dualIsGoogle && tt.geminiPrompt) promptText = tt.geminiPrompt;
+                        else if (tt.gptPrompt) promptText = tt.gptPrompt;
+                        else promptText = tt.prompt || promptText;
+                      }
+                    } else if (dualInstr) {
+                      // 双槽 gemini/nano-banana（换背景/换脸/面料）：使用其专属指令作为唯一提示词，
+                      // 不再叠加通用 prompt，避免与 gpt 的提示词混杂、减少模型误解（gpt 用 input_fidelity 锁身份，gemini 需独立指令）
+                      if (isDualSlotTryon && dualIsGoogle) {
+                        promptText = dualInstr;
+                      } else {
+                        promptText = dualInstr + promptText;
+                      }
                     } else if (refCount > 1) {
                       const refLabels = Array.from({ length: refCount }, (_, i) => `参考图${i + 1}`).join('、');
                       promptText = `[共 ${refCount} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
+                    }
+                    // Gemini/nano-banana 走 chat 多模态，没有 gpt 的 input_fidelity 锁身份机制，
+                    // 换装时容易重绘模特面部/表情。款式上身+gemini 时追加"像素级身份锁定"后缀，
+                    // 把表情/神态/头部角度/姿态全部锁死，避免变成另一张脸（gpt 走 edits 端点不经过此分支）
+                    if (task.featureId === 'shoot-tryon' && dualIsGoogle) {
+                      promptText += '\n\n【最重要·像素级身份锁定】这是对图2这张照片的局部修改，只替换服装，不是重新生成照片。图2中人物的一切必须与图2原图完全一致、一个像素都不能改变：表情、眼神、神态、嘴角、眉毛、头型、头部角度与朝向、脸型、五官、发型、身材、姿势、手部动作、肤色，以及背景、场景、光线、色调、构图。禁止改变表情和神态、禁止换脸、禁止重绘整张照片、禁止调整整体色调。最终必须是与图2同一张脸、同一个表情、同一个头部角度、同一种姿势的同一张照片。';
                     }
                     const colorSuffix = buildColorPreserveSuffix();
                     if (colorSuffix) promptText = promptText + colorSuffix;
@@ -1580,7 +1660,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                           chatContent.push({ type: 'text', text: `图${ei + 1}：` });
                           chatContent.push({ type: 'image_url', image_url: { url: imageEditBase64List[ei] } });
                         }
-                        chatContent.push({ type: 'text', text: `指令：将图1的${chatItem}${chatItem === '配饰佩戴到' ? '' : '穿'}到图2模特身上，保持图2模特的脸、姿势、背景不变，只换${chatItem}。` + promptText });
+                        // 款式上身双槽：图片标签 + 模型专属提示词（gemini/gpt 独立，不叠加通用指令）
+                        if (task.featureId === 'shoot-tryon') {
+                          chatContent.push({ type: 'text', text: promptText });
+                        } else {
+                          chatContent.push({ type: 'text', text: `指令：将图1的${chatItem}${chatItem === '配饰佩戴到' ? '' : '穿'}到图2模特身上，保持图2模特的脸、姿势、背景不变，只换${chatItem}。` + promptText });
+                        }
                       }
                     } else {
                       chatContent.push({ type: 'text', text: promptText });
@@ -1599,35 +1684,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       ],
                     };
                     // nano-banana/gemini 图生图（OpenAI 兼容 chat/completions 多模态）：
-                    // 实测结论（2026-10-12，用户 API 后台对照）：
-                    // ① 只发顶层 image_size/aspect_ratio：中转能记录显示"大小3584x4800"，但转发给上游
-                    //    Gemini 时被静默忽略（chat 端点非标准字段）→ 结果仍是 1K。
-                    // ② Gemini 原生尺寸参数是 generationConfig.imageConfig.imageSize+aspectRatio，
-                    //    OpenAI 兼容层通过 extra_body.generation_config.image_config 传递（官方文档）。
-                    // 因此：三层全发（generationConfig 原生 + extra_body 兼容层 + 顶层 image_size 兜底），
-                    // 中转认哪个用哪个；未识别字段会被静默忽略，不报错。
-                    // 文生图走 images 接口，仍只用顶层 image_size 档位词，不受影响。
-                    if (variant.body.image_size) {
-                      const imgSize = variant.body.image_size;
-                      const ratio = variant.body.aspect_ratio;
-                      chatBody.image_size = imgSize;
-                      if (ratio) chatBody.aspect_ratio = ratio;
-                      // ① Gemini 原生 generateContent 结构（多个中转文档确认）
-                      chatBody.generationConfig = {
-                        imageConfig: {
-                          imageSize: imgSize,
-                          ...(ratio ? { aspectRatio: ratio } : {}),
-                        },
-                      };
-                      // ② Google 官方 OpenAI 兼容层：extra_body.generation_config.image_config
-                      chatBody.extra_body = {
-                        generation_config: {
-                          image_config: {
-                            image_size: imgSize,
-                            ...(ratio ? { aspect_ratio: ratio } : {}),
-                          },
-                        },
-                      };
+                    // 图生图 chat/completions 端点：中转(ai.t8star)只认 size 像素字段（如 "1792x2400"），
+                    // 不认 image_size/generationConfig/extra_body（image_size 仅文生图/ images 接口用）。
+                    // 2026-10-12 15:52 实测确认：图生图 chat 只发 size 像素即可出正确分辨率(2K/4K)。
+                    // 直接从 task.ratio 解析像素强制设置，不依赖 variant.body.size（避免该字段在 chat 分支读取为 undefined）。
+                    const pm = task.ratio.match(/(\d+)\s*[x×X]\s*(\d+)/);
+                    if (pm) {
+                      chatBody.size = `${pm[1]}x${pm[2]}`;
                     } else if (variant.body.size) {
                       chatBody.size = variant.body.size;
                     }
@@ -1650,8 +1713,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
                     // 方式A（标准多文件）：同一字段名多次 append
                     // 多数后端框架会自动解析为数组（如 Express multer、Fastify files）
-                    logger.info(`${debugPrefix}   📦 FormData 参考图数量=${imageEditFiles.length}, 字段名=${attempt.fieldName}`);
-                    imageEditFiles.forEach((file, idx) => {
+                    // 改色+用户蒙版：edits 必须 image 与 mask 严格 1:1 对齐才能让蒙版区域锁定生效。
+                    // 双槽改色(原图base+色图color)若两张都 append 到 image，单张 mask 无法正确对应原图，
+                    // 会导致蒙版失效或把色图当主图。因此带蒙版时只发 base 原图（色图信息由提示词【选色】携带）。
+                    const maskExclusiveFiles = (attempt.extraParams.__useMask === 'true' && task.featureId === 'design-recolor' && task.maskEnabled)
+                      ? imageEditFiles.slice(0, 1)
+                      : imageEditFiles;
+                    logger.info(`${debugPrefix}   📦 FormData 参考图数量=${imageEditFiles.length}, 字段名=${attempt.fieldName}` +
+                      `${maskExclusiveFiles.length < imageEditFiles.length ? '（改色+蒙版：仅发原图 base 与 mask 对齐）' : ''}`);
+                    maskExclusiveFiles.forEach((file, idx) => {
                       fd.append(attempt.fieldName, file, file.name);
                       logger.info(`${debugPrefix}     [${idx + 1}] append ${attempt.fieldName}: ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
                     });
@@ -1703,6 +1773,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       fd.append('strength', strength);
                     }
                     // 双槽 gpt-image：input_fidelity=high 锁定模特五官/身份，避免重新生成新脸
+                    // 【隔离边界】以下逻辑仅属于 gpt-image 系（dualIsOpenAIImage）：
+                    //   gemini/nano-banana 不经过此分支（它们走 generations-json 拼图分支，见 L1843 附近）；
+                    //   修改 gpt 行为只在此分支内进行，禁止改动 gemini/volc 分支。
                     if (isDualSlotTryon && dualIsOpenAIImage) {
                       fd.append('input_fidelity', 'high');
                     }
@@ -1710,13 +1783,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     // variations 端点不需要 prompt
                     if (!isVarEndpoint && attempt.extraParams.__useMask !== 'true' ? true : !isVarEndpoint) {
                       let promptText = String(variant.body.prompt || '');
-                      // 双槽：用 slot 感知指令；否则维持原有泛化编号
-                      const dualInstr = buildDualSlotInstruction();
-                      if (dualInstr) {
-                        promptText = dualInstr + promptText;
-                      } else if (imageEditFiles.length > 1) {
-                        const refLabels = Array.from({ length: imageEditFiles.length }, (_, i) => `参考图${i + 1}`).join('、');
-                        promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
+                      // 款式上身（shoot-tryon）双槽按模型取独立提示词（gpt-image 走 edits formdata 也生效）
+                      if (isDualSlotTryon && task.featureId === 'shoot-tryon') {
+                        const tt = getFeatureTemplate(task.featureId)?.tryonTypes?.find(x => x.id === (task.tryonType || 'clothes'));
+                        if (tt) {
+                          if (dualIsOpenAIImage && tt.gptPrompt) promptText = tt.gptPrompt;
+                          else if (dualIsGoogle && tt.geminiPrompt) promptText = tt.geminiPrompt;
+                          else promptText = tt.prompt || promptText;
+                        }
+                      } else {
+                        // 双槽：用 slot 感知指令；否则维持原有泛化编号
+                        const dualInstr = buildDualSlotInstruction();
+                        if (dualInstr) {
+                          promptText = dualInstr + promptText;
+                        } else if (imageEditFiles.length > 1) {
+                          const refLabels = Array.from({ length: imageEditFiles.length }, (_, i) => `参考图${i + 1}`).join('、');
+                          promptText = `[共 ${imageEditFiles.length} 张参考图：${refLabels}，按顺序排列]\n${promptText}`;
+                        }
                       }
                       const colorSuffix = buildColorPreserveSuffix();
                       if (colorSuffix) promptText = promptText + colorSuffix;
@@ -1766,12 +1849,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                       const refLabels = Array.from({ length: imageEditBase64List.length }, (_, i) => `参考图${i + 1}`).join('、');
                       jsonBody.prompt = `[共 ${imageEditBase64List.length} 张参考图：${refLabels}，按顺序排列]\n${String(jsonBody.prompt)}`;
                     }
+                    // 双槽 gemini/nano-banana：generations 端点多图 images 数组被中转忽略、只认单图字段（丢图2），
+                    // 故前端把「款式图(上)+模特图(下)」合成一张单图上传，保证两张图都到达且单图可出 2K/4K。
+                    // 【隔离边界】以下逻辑仅属于 gemini/nano-banana 系（dualIsGoogle）：
+                    //   gpt-image 不经过此分支（它们走 edits formdata 分支，见 L1770 附近）；
+                    //   修改 gemini 行为只在此分支内进行，禁止改动 gpt/volc 分支。
+                    let composedDual = false;
+                    if (isDualSlotTryon && dualIsGoogle && imageEditBase64List.length >= 2) {
+                      const composed = await composeTwoImagesToSingle(imageEditBase64List, 768, debugPrefix);
+                      if (composed) {
+                        composedDual = true;
+                        jsonBody[attempt.fieldName] = composed;
+                        // 拼图单图一次只能出 1 张：强制 n=1，避免请求 n=2 被上游按 n 扣费却只返回 1 张（扣费与结果不一致）。
+                        // 若用户要多张，后续由"数量不足补齐"循环自动再发（见 L2277 补齐逻辑），不会漏张也不重复扣费。
+                        if (jsonBody.n !== undefined) {
+                          // eslint-disable-next-line no-console
+                          logger.info(`${debugPrefix}   🧩 双槽 gemini 拼图单图强制 n: ${jsonBody.n} → 1（一次拼图只出 1 张，避免按 n 扣费）`);
+                          jsonBody.n = 1;
+                        }
+                        const basePrompt = String(jsonBody.prompt || '');
+                        // gemini/nano-banana 双槽款式上身：默认强加防泛红/中性白平衡约束（该系模型高频整体偏红），
+                        // 不依赖用户开启色彩保真/自动校色开关，避免整图泛红。
+                        const antiRed =
+                          `整幅输出必须保持中性真实白平衡，禁止整体偏红、泛红、红色色温漂移、面部潮红、皮肤发红，` +
+                          `禁止暖红滤镜、禁止红色通道溢出，下半部分模特肤色和背景颜色必须与拼图下半部分原图完全一致，不得偏暖红。`;
+                        const colorSuffix = buildColorPreserveSuffix();
+                        jsonBody.prompt =
+                          `输入图片由上下两半组成：上半部分是衣服款式图，下半部分是模特照片底图。` +
+                          `请把上半部分展示的衣服穿到下半部分模特的身上。` +
+                          `严格保持下半部分模特每一个像素不变：面部五官、表情、发型、身材、姿势、肤色、皮肤颜色、手上动作、鞋、背景、场景、光线、色调，全部不得重绘、不得偏色、禁止泛红。` +
+                          `只改变下半部分模特身上的这一件衣服（款式、颜色、图案、材质来自上半部分）。` +
+                          `最终只输出下半部分这位模特被换上该衣服后的完整照片，裁掉上半部分。` +
+                          `这是换装不是重绘，禁止换脸、禁止改身材、禁止调整体色调。` +
+                          antiRed +
+                          (colorSuffix ? colorSuffix : '') +
+                          (basePrompt ? `\n用户补充要求：${basePrompt}` : '');
+                        // eslint-disable-next-line no-console
+                        logger.info(`${debugPrefix}   🧩 双槽 gemini 已合成单图上传（上款式/下模特），prompt 已改写为拼图指令`);
+                      }
+                    }
                     if (imageEditBase64List.length === 1) {
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
                     } else if (isDualSlotTryon && dualIsVolc) {
                       // 火山 Seedream：顶层 image 字段直接传数组（图1衣服, 图2模特底图），官方多图参考格式
                       jsonBody.image = imageEditBase64List.slice(0, 14);
-                    } else {
+                    } else if (!composedDual) {
                       // 多图：images 数组字段；同时保留第一张用原字段名（部分API只认单图字段）
                       jsonBody.images = imageEditBase64List;
                       jsonBody[attempt.fieldName] = imageEditBase64List[0];
@@ -2009,6 +2131,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 break;  // 跳出变体循环，不再降级
               }
 
+              // 无可用渠道（HTTP 503 / "无可用渠道" / "no available distributor" / "no available channel"）：
+              // 上游该模型渠道不可用，重试/降级变体/换端点必再失败，且请求已计费 → 立即终止，避免重复扣费
+              if (
+                res.status === 503 ||
+                errMsgLower.includes('无可用渠道') ||
+                errMsgLower.includes('no available distributor') ||
+                errMsgLower.includes('no available channel') ||
+                errMsgLower.includes('channel not available')
+              ) {
+                lastError = `HTTP ${res.status}: ${errMsg}`;
+                lastFullError = responseText;
+                triedEndpoints = endpoints.length + 1;  // 终止所有端点重试
+                break;  // 跳出变体循环，不再降级
+              }
+
               // 如果是 invalid_request 类错误，且还有下一个变体，继续降级尝试
               if (isInvalidRequestError(res.status, errInfo) && vi < bodyVariants.length - 1) {
                 // eslint-disable-next-line no-console
@@ -2143,6 +2280,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 triedEndpoints = endpoints.length + 1;
                 break;
               }
+              // 无可用渠道（503 / 无可用渠道 / no available distributor/channel）：必再失败且已计费，终止所有端点
+              if (e.message.includes('503') || /无可用渠道|no available distributor|no available channel|channel not available/i.test(e.message)) {
+                triedEndpoints = endpoints.length + 1;
+                break;
+              }
               // 这里是从 if (!res.ok) 分支 throw 出来的，已经处理过了
               // 如果还有下一个 endpoint，让外层继续
               break;
@@ -2208,7 +2350,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               if (format === 'json') {
                 // JSON + base64 方式
                 const jsonBody: Record<string, unknown> = { ...successVariantBodyForFill };
-                if (imageEditBase64List.length === 1) {
+                // 【隔离边界】gemini/nano-banana 双槽补齐同样走"拼图单图"（generations 单图一次只出1张，
+                // 与主请求一致，避免多图 images 数组丢图2导致换装错；每次补齐 n 已强制为 1）
+                if (isDualSlotTryon && dualIsGoogle && imageEditBase64List.length >= 2) {
+                  const composed = await composeTwoImagesToSingle(imageEditBase64List, 768, debugPrefix);
+                  if (composed) {
+                    jsonBody[fieldName] = composed;
+                    if (jsonBody.n !== undefined) jsonBody.n = 1;
+                    // eslint-disable-next-line no-console
+                    logger.info(`${debugPrefix}    🧩 补齐：双槽 gemini 已合成单图上传（上款式/下模特），n 强制为 1`);
+                  } else if (imageEditBase64List.length === 1) {
+                    jsonBody[fieldName] = imageEditBase64List[0];
+                  }
+                } else if (imageEditBase64List.length === 1) {
                   jsonBody[fieldName] = imageEditBase64List[0];
                 } else if (isDualSlotTryon && dualIsVolc) {
                   jsonBody.image = imageEditBase64List.slice(0, 14);

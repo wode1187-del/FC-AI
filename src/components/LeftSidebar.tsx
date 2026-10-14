@@ -280,49 +280,7 @@ export default function LeftSidebar() {
           {/* 功能模板（服装商拍 / 服装设计 / 视频生成） */}
           <FeaturePicker />
 
-          {/* Current Project */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-medium text-muted-foreground">当前项目</label>
-              <span className="text-xs text-muted-foreground">{currentProject?.taskCount || 0} 个任务</span>
-            </div>
-            <Select value={currentProjectId} onValueChange={setCurrentProjectId}>
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {projects.map((p) => (
-                  <SelectItem key={p.id} value={p.id} className="text-sm">
-                    <span className="flex items-center gap-2">
-                      {p.name}
-                      <span className="text-xs text-muted-foreground">({p.taskCount})</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Tech Type + Biz Tag */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs text-muted-foreground">技术类型</label>
-              <Button variant="ghost" size="icon" className="h-6 w-6">
-                <Settings className="size-3.5 text-muted-foreground" />
-              </Button>
-            </div>
-            <div className="px-3 py-2 bg-muted/30 rounded-md text-sm">{currentProject?.techType || 'AI图生图'}</div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs text-muted-foreground">业务标签</label>
-              <Button variant="ghost" size="icon" className="h-6 w-6">
-                <Settings className="size-3.5 text-muted-foreground" />
-              </Button>
-            </div>
-            <div className="px-3 py-2 bg-muted/30 rounded-md text-sm">{currentProject?.bizTag || '电商/女装'}</div>
-          </div>
+          {/* Current Project + Tech Type + Biz Tag —— 已按用户要求隐藏（2026-10-13） */}
 
           {/* Project Actions */}
           <div className="grid grid-cols-4 gap-1.5">

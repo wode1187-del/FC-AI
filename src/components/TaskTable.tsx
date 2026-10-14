@@ -273,8 +273,15 @@ const TaskPromptCell = memo(function TaskPromptCell({
             <button
               key={t.id}
               onClick={() => {
-                updateTask(task.id, { tryonType: t.id as ITask['tryonType'], prompt: t.prompt });
-                setLocalPrompt(t.prompt);
+                // 款式上身提示词按模型族完全独立：Gemini/NanoBanana 用 geminiPrompt，gpt-image 用 gptPrompt，其余用通用 prompt
+                const modelId = task.model || '';
+                const pick = /nano-banana|gemini/i.test(modelId)
+                  ? (t.geminiPrompt || t.prompt)
+                  : /gpt-image/i.test(modelId)
+                    ? (t.gptPrompt || t.prompt)
+                    : t.prompt;
+                updateTask(task.id, { tryonType: t.id as ITask['tryonType'], prompt: pick });
+                setLocalPrompt(pick);
               }}
               className={`rounded border transition-colors ${
                 task.featureId === 'shoot-3d' ? 'px-3 py-1 text-xs' : 'px-2 py-0.5 text-[10px]'
@@ -1650,6 +1657,7 @@ export default function TaskTable() {
                                               <span className="text-base">{s.icon}</span>{s.label}
                                             </div>
                                             {s.id === 'base' && (
+                                              <>
                                               <button
                                                 onClick={(e) => {
                                                   e.stopPropagation();
@@ -1662,6 +1670,7 @@ export default function TaskTable() {
                                               >
                                                 🎯 蒙版{task.maskEnabled ? '✓' : ''}
                                               </button>
+                                              </>
                                             )}
                                           </div>
                                           {slotImgs.length > 0 && (
@@ -1792,6 +1801,19 @@ export default function TaskTable() {
                           value={activeModels.length > 0 ? task.model : ''}
                           onValueChange={(v) => {
                             const patch: Partial<ITask> = { model: v, modelLabel: activeModels.find(m => m.id === v)?.name || v };
+                            // 款式上身：切模型时按模型族自动刷新当前部位的专属提示词（gemini→geminiPrompt / gpt-image→gptPrompt），与 gpt 提示词互不混用
+                            if (task.featureId === 'shoot-tryon') {
+                              const partId = task.tryonType || 'clothes';
+                              const part = getFeatureTemplate(task.featureId)?.tryonTypes?.find(t => t.id === partId);
+                              if (part) {
+                                const isGemini = /nano-banana|gemini/i.test(v);
+                                const isGptImage = /gpt-image/i.test(v);
+                                const picked = isGemini ? (part.geminiPrompt || part.prompt)
+                                  : isGptImage ? (part.gptPrompt || part.prompt)
+                                  : part.prompt;
+                                if (picked) { patch.prompt = picked; }
+                              }
+                            }
                             // AI换背景 + 切到 Gemini/Nano Banana 系模型：自动键入专用换背景提示词，
                             // 避免通用提示词该模型理解不了（任务：图1背景→图2背景，人物皮肤/背景颜色全保真、禁止偏色）
                             if (task.featureId === 'shoot-bg' && /nano-banana|gemini/i.test(v)) {

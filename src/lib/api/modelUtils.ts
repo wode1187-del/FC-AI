@@ -51,6 +51,7 @@ export function matchModelPresetKey(modelIdOrName: string): string | null {
   if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
   if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
   if (lower.includes('flux-kontext') || lower.includes('flux-context') || lower.includes('kontext') || lower.includes('context')) return 'flux-kontext';
+  if (lower.includes('seededit')) return 'doubao-seededit-3.0-i2i';
   if (lower.includes('inpaint')) return 'mj-inpaint';
   if (lower.includes('flux')) return 'flux-1.1-pro';
   if (lower.includes('wan-2.7-global-i2i-pro') || lower.includes('wan2.7-i2i-pro')) return 'wan-2.7-global-i2i-pro';
@@ -124,6 +125,7 @@ export function matchPresetKeyForModel(modelId: string, modelName: string): stri
   if (lower.includes('flux-1-dev') || lower.includes('flux-1.dev') || lower.includes('flux-dev')) return 'flux-1-dev';
   if (lower.includes('flux-1-schnell') || lower.includes('flux-1.schnell') || lower.includes('flux-schnell')) return 'flux-1-schnell';
   if (lower.includes('flux-kontext') || lower.includes('flux-context') || lower.includes('kontext') || lower.includes('context')) return 'flux-kontext';
+  if (lower.includes('seededit')) return 'doubao-seededit-3.0-i2i';
   if (lower.includes('inpaint')) return 'mj-inpaint';
   if (lower.includes('flux')) return 'flux-1.1-pro';
   return 'flux-1.1-pro';
