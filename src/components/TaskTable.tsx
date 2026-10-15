@@ -58,6 +58,7 @@ import {
    Loader2,
    Clapperboard,
    RotateCcw,
+   Wand2,
  } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -83,7 +84,7 @@ import { Image } from '@/components/ui/image';
 import { logger, scopedStorage } from '@lark-apaas/client-toolkit-lite';
 import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
-import MaskEditor from '@/components/MaskEditor';
+import MaskEditor, { runRecolorInWorker } from '@/components/MaskEditor';
 import { useApp } from '@/context/AppContext';
 import { isVideoModel, getFeatureTemplate, getVideoDurationLimit } from '@/data/featureTemplates';
 import { VIDEO_PROMPT_PRESETS, IMAGE_PROMPT_PRESETS } from '@/data/promptPresets';
@@ -124,6 +125,39 @@ const TaskPromptCell = memo(function TaskPromptCell({
   const [openOptionPanel, setOpenOptionPanel] = useState(false);
   // 自由改款专属：用户自定义补充提示词（独立于改款/排版自动提示词）
   const [localCustom, setLocalCustom] = useState(task.customPrompt || '');
+
+  // 本地精确换色：分割衣服蒙版 + 保留明度色相旋转（不调用 API，布料像素是原始像素、只改色度）——Qwen 正确路线
+  function localRecolorHere() {
+    const hex = (task.prompt.match(/【选色】服装颜色改为(?:[^（】]*（)?(#[0-9A-Fa-f]{6})/))?.[1] || '#9B5DE5';
+    const ref = task.referenceImages?.[0];
+    if (!ref?.url) { toast.warning('请先上传参考图（本功能需原图作为素材）'); return; }
+    toast.info('正在本地精确换色（分割衣服蒙版 + 保留明度，不调用 API）…');
+    const img = new window.Image();
+    img.onload = async () => {
+      try {
+        const max = 1536;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const out = await runRecolorInWorker(id, hex);
+        canvas.width = out.width; canvas.height = out.height;
+        ctx.putImageData(out, 0, 0);
+        const url = canvas.toDataURL('image/jpeg', 0.92);
+        const now = Date.now();
+        updateTask(task.id, { results: [...(task.results || []), {
+          id: `local-recolor-${now}`, url, model: task.model || 'local', prompt: `本地精确换色 → ${hex}`,
+          createdAt: now, width: out.width, height: out.height, type: 'image',
+        }] });
+        toast.success('本地精确换色完成（纹理保留，未调用 API）');
+      } catch (e) { toast.error('本地精确换色失败：' + String(e)); }
+    };
+    img.onerror = () => toast.error('参考图加载失败');
+    img.src = ref.url;
+  }
   // 合成完整提示词 = 基础 + 【改款意图】 + 【排版】 + 【自定义】
   const buildPrompt = useCallback((
     mod: Record<string, string[]>,
@@ -691,8 +725,8 @@ const TaskPromptCell = memo(function TaskPromptCell({
           )}
         </div>
       )}
-      {/* 图片提示词预设（角度/场景/姿势/风格），点击追加 */}
-      {!isVideoModel(task.model) && (
+      {/* 图片提示词预设（角度/场景/姿势/风格），点击追加——服装商拍(shoot-*)与服装设计(design-*)全部功能均不显示无关预设 */}
+      {!isVideoModel(task.model) && !task.featureId?.startsWith('shoot-') && !task.featureId?.startsWith('design-') && (
         <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-muted-foreground flex items-center gap-1">
@@ -890,6 +924,9 @@ const TaskPromptCell = memo(function TaskPromptCell({
             />
           </div>
           <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" variant="outline" className="h-6 text-[10px] bg-background hover:bg-accent" onClick={localRecolorHere} title="本地分割衣服蒙版+保留明度只改色相，不调用API、不重绘纹理">
+              <Wand2 className="size-3 mr-1" />本地精确换色<span className="text-[8px] text-muted-foreground ml-0.5">（保留纹理·不调API）</span>
+            </Button>
             {[
               { name: '黑色', color: '#000000' },
               { name: '白色', color: '#FFFFFF' },
@@ -1114,6 +1151,8 @@ export default function TaskTable() {
   const [editorImage, setEditorImage] = useState<{ taskId: string; imgIndex: number; url: string; name: string } | null>(null);
   // 蒙版编辑器
   const [maskEditor, setMaskEditor] = useState<{ taskId: string; url: string; name: string } | null>(null);
+
+
   // 原图 vs 效果图对比弹窗
   const [compare, setCompare] = useState<{ before: string; after: string; taskIndex: number; resultIdx: number } | null>(null);
   const [comparePos, setComparePos] = useState(50);
@@ -2577,10 +2616,11 @@ export default function TaskTable() {
                           </SelectContent>
                         </Select>
                       </div>
+                      {isVideoModel(task.model) && (
                       <div className="space-y-1">
-                        <label className="text-[10px] text-muted-foreground">多模型对比（同提示词各出一张）</label>
+                        <label className="text-[10px] text-muted-foreground">多模型对比（同提示词各出一段）</label>
                         <div className="flex flex-wrap gap-1 max-h-[92px] overflow-y-auto">
-                          {activeModels.filter(m => !isVideoModel(m.id)).map(m => {
+                          {activeModels.filter(m => isVideoModel(m.id)).map(m => {
                             const on = comparePick.includes(m.id);
                             return (
                               <button key={m.id} onClick={() => setComparePick(prev => on ? prev.filter(x => x !== m.id) : [...prev, m.id])}
@@ -2594,6 +2634,7 @@ export default function TaskTable() {
                           <Sparkles className="size-3 mr-1" />对比生成
                         </Button>
                       </div>
+                      )}
                       <div className="space-y-1">
                         <label className="text-[10px] text-muted-foreground">比例与分辨率</label>
                         <Select

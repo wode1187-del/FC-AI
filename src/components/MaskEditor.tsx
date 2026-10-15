@@ -35,18 +35,19 @@ function ensureWorker(): Worker {
 }
 
 /** 在 Worker 后台线程跑分割，返回前景蒙版 ImageData（白色=要重绘） */
-function runInWorker(type: 'run' | 'run-cloth', image: ImageData): Promise<ImageData> {
+function runInWorker(type: 'run' | 'run-cloth' | 'run-recolor', image: ImageData, targetHex?: string): Promise<ImageData> {
   return new Promise((resolve, reject) => {
     if (workerBusy) { reject(new Error('已有识别任务进行中')); return; }
     const w = ensureWorker();
     workerBusy = true;
     pendingResolve = resolve;
     pendingReject = reject;
-    w.postMessage({ type, image });
+    w.postMessage(type === 'run-recolor' ? { type, image, targetHex } : { type, image });
   });
 }
 const runRmbgInWorker = (image: ImageData) => runInWorker('run', image);
 const runClothInWorker = (image: ImageData) => runInWorker('run-cloth', image);
+export const runRecolorInWorker = (image: ImageData, targetHex: string) => runInWorker('run-recolor', image, targetHex);
 
 interface MaskEditorProps {
   open: boolean;

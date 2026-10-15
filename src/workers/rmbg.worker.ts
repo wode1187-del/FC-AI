@@ -297,6 +297,78 @@ async function runClothSeg(image: ImageData): Promise<ImageData> {
   return uctx.getImageData(0, 0, SIZE, SIZE);
 }
 
+// ================= 本地精确换色：衣服蒙版 + 保留明度色相旋转（不重绘，布料像素是原始像素） =================
+// Qwen 正确路线：不用 AI inpaint（蒙版内仍重绘、纹理必损）；分割模型出精确衣服蒙版 + 蒙版内色彩空间变换，
+// 保留明度通道（L=亮度=纹理），只把色相转到目标色，饱和度按需抬升，边缘按蒙版 alpha 羽化。
+function hexToRgb(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0; const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      default: h = (r - g) / d + 4;
+    }
+    h /= 6;
+  }
+  return [h, s, l];
+}
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  let r = 0, g = 0, b = 0;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const f = (t: number) => {
+      t = (t + 1) % 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    r = f(h + 1 / 3); g = f(h); b = f(h - 1 / 3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+/** 本地精确换色：仅衣服蒙版内像素改色，纹理（明度）原样保留，边缘羽化 */
+async function runRecolor(image: ImageData, targetHex: string): Promise<ImageData> {
+  const maskSmall = await runClothSeg(image); // 512×512 衣服蒙版（白=衣服，alpha=概率）
+  const W = image.width, H = image.height;
+  const mC = new OffscreenCanvas(W, H);
+  const mCtx = mC.getContext('2d', { willReadFrequently: true })!;
+  mCtx.drawImage(maskSmall as unknown as CanvasImageSource, 0, 0, W, H);
+  const md = mCtx.getImageData(0, 0, W, H).data;
+
+  const [tr, tg, tb] = hexToRgb(targetHex);
+  const targetHue = rgbToHsl(tr, tg, tb)[0];
+
+  const src = image.data;
+  const out = new ImageData(W, H);
+  const od = out.data;
+  for (let i = 0; i < src.length; i += 4) {
+    const alpha = md[i + 3] / 255;
+    const r = src[i], g = src[i + 1], b = src[i + 2];
+    od[i + 3] = src[i + 3];
+    if (alpha <= 0) { od[i] = r; od[i + 1] = g; od[i + 2] = b; continue; }
+    // 保留原明度 L（纹理），色相转目标，饱和兜底抬升保证纯色/灰衣也能上色
+    const [, s, l] = rgbToHsl(r, g, b);
+    const sEff = Math.max(s, 0.42);
+    const [nr, ng, nb] = hslToRgb(targetHue, sEff, l);
+    od[i] = Math.round(nr * alpha + r * (1 - alpha));
+    od[i + 1] = Math.round(ng * alpha + g * (1 - alpha));
+    od[i + 2] = Math.round(nb * alpha + b * (1 - alpha));
+  }
+  return out;
+}
+
 self.addEventListener('error', (e: any) => {
   (self as any).postMessage({ type: 'error', message: 'WORKER_ERROR ' + (e?.message || '') + ' @' + (e?.filename || '') + ':' + (e?.lineno || '') });
 });
@@ -323,6 +395,13 @@ self.onmessage = async (e: MessageEvent) => {
   } else if (data.type === 'run-removebg') {
     try {
       const out = await runRemoveBg(data.image as ImageData);
+      (self as any).postMessage({ type: 'result', mask: out });
+    } catch (err: any) {
+      (self as any).postMessage({ type: 'error', message: String(err?.message || err) });
+    }
+  } else if (data.type === 'run-recolor') {
+    try {
+      const out = await runRecolor(data.image as ImageData, data.targetHex as string);
       (self as any).postMessage({ type: 'result', mask: out });
     } catch (err: any) {
       (self as any).postMessage({ type: 'error', message: String(err?.message || err) });

@@ -283,12 +283,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const [activeModels, setActiveModelsState] = useState<IModel[]>(() => {
     const cached = safeParse<IModel[]>(scopedStorage.getItem(KEY_ACTIVE_MODELS), []);
-    // 内置模型一律不勾选（默认不激活）：只保留用户自定义(API)模型。
-    // 内置模型随版本更新即时生效，用户无需勾选；如需使用可到 API 页面手动勾选。
-    if (cached && Array.isArray(cached) && cached.length > 0) {
-      return cached.filter(m => m.isCustom);
+    // 内置模型默认激活（不再默认隐藏）：图片内置(MOCK_MODELS)与视频内置(VIDEO_MODELS)随版本更新即时生效，无需手动勾选；
+    // 缓存中用户自定义(API)模型一并保留。
+    const builtins = ([] as IModel[]).concat(MOCK_MODELS, VIDEO_MODELS).filter(m => m.isActive !== false);
+    const map = new Map<string, IModel>();
+    builtins.forEach(m => { if (m && m.id) map.set(m.id, m); });
+    if (cached && Array.isArray(cached)) {
+      cached.forEach(m => { if (m && m.id && !map.has(m.id)) map.set(m.id, m); });
     }
-    return [];
+    return [...map.values()];
   });
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
