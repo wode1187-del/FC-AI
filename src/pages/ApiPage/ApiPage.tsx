@@ -26,8 +26,7 @@ const API_TABS = [
   { id: 'google', label: 'Google / Nano Banana', sub: '爆炸香蕉' },
   { id: 'volcengine', label: '火山引擎 / 即梦', sub: '即梦 5.0' },
   { id: 'custom', label: '自定义兼容接口', sub: 'OpenAI Compatible' },
-  { id: 'kling', label: '可灵视频', sub: 'KLING 图生视频' },
-  { id: 'seedance', label: '即梦视频', sub: 'Seedance 视频' },
+  { id: 'video', label: '自定义视频接口', sub: '可灵 + 即梦' },
   { id: 'prompt', label: '提示词优化 API', sub: '独立文本模型' },
 ];
 
@@ -98,6 +97,7 @@ export default function ApiPage() {
   const getConfigByType = useCallback(
     (type: string, isSecondary = false) => {
       if (type === 'custom' && isSecondary) return customSecondary;
+      if (type === 'video') return apiConfigs.find((c) => c.type === 'kling' && !c.isSecondary) || null;
       return apiConfigs.find((c) => c.type === type && !c.isSecondary);
     },
     [apiConfigs, customSecondary],
@@ -106,7 +106,7 @@ export default function ApiPage() {
   const filteredModels = useMemo(() => {
     return allModels.filter(
       (m) =>
-        m.apiType === activeTab &&
+        (activeTab === 'video' ? (m.apiType === 'kling' || m.apiType === 'seedance') : m.apiType === activeTab) &&
         (m.name.toLowerCase().includes(modelSearch.toLowerCase()) ||
           m.id.toLowerCase().includes(modelSearch.toLowerCase())),
     );
@@ -190,7 +190,7 @@ export default function ApiPage() {
     if (activeTab === 'custom') {
       return activeModels.filter((m) => m.apiType === 'custom' || m.isCustom).length;
     }
-    return activeModels.filter((m) => m.apiType === activeTab).length;
+    return activeModels.filter((m) => (activeTab === 'video' ? (m.apiType === 'kling' || m.apiType === 'seedance') : m.apiType === activeTab)).length;
   }, [activeModels, activeTab]);
 
   const tabTotalCount = useMemo(() => {
@@ -209,6 +209,10 @@ export default function ApiPage() {
           </p>
         </div>
 
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300/90">
+          安全提示：密钥以明文保存在本机浏览器（localStorage），本机其他程序可能读取到。请勿在公共/共享电脑配置，离开前请清空密钥。
+        </div>
+
         <Card className="border-border/60">
           <CardHeader className="pb-4">
             <CardTitle className="text-base">接口配置</CardTitle>
@@ -218,7 +222,7 @@ export default function ApiPage() {
           </CardHeader>
           <CardContent>
               <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-              <TabsList className="grid grid-cols-7 mb-6 w-full">
+              <TabsList className="grid grid-cols-6 mb-6 w-full">
                 {API_TABS.map((tab) => (
                   <TabsTrigger key={tab.id} value={tab.id} className="flex flex-col gap-0.5 py-2">
                     <span className="text-xs font-medium">{tab.label}</span>
@@ -234,6 +238,73 @@ export default function ApiPage() {
 
                 return (
                   <TabsContent key={tab.id} value={tab.id} className="space-y-6 mt-0">
+                    {tab.id === 'video' && (
+                      <>
+                        {[getConfigByType('kling'), getConfigByType('seedance')].filter(Boolean).map((vc) => {
+                          if (!vc) return null;
+                          const vVerified = vc.status === 'verified';
+                          const vLabel = vc.type === 'kling' ? '接口 1 · 可灵 KLING' : '接口 2 · 即梦 SEEDANCE';
+                          return (
+                            <div key={vc.id} className="space-y-4 p-4 rounded-lg bg-muted/30 border border-border/40">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-medium">{vLabel}</span>
+                                  <Badge variant="outline" className="text-[10px] py-0 h-5">独立地址 · 可分别使用</Badge>
+                                </div>
+                                <Badge variant={vVerified ? 'default' : 'secondary'} className="text-[10px] font-normal">
+                                  {vVerified ? '已验证' : vc.status === 'error' ? '验证失败' : '待验证'}
+                                </Badge>
+                              </div>
+                              <div className="space-y-3">
+                                <div className="space-y-1.5">
+                                  <Label className="text-xs text-muted-foreground">接口地址 (Base URL)</Label>
+                                  <Input
+                                    value={vc.baseUrl}
+                                    onChange={(e) => updateApiConfig(vc.id, { baseUrl: e.target.value })}
+                                    placeholder={vc.type === 'kling' ? 'https://api-beijing.klingai.com' : 'https://ark.cn-beijing.volces.com'}
+                                    className="h-9 text-sm font-mono"
+                                  />
+                                </div>
+                                <div className="space-y-1.5">
+                                  <Label className="text-xs text-muted-foreground">API 密钥</Label>
+                                  <div className="flex gap-2">
+                                    <div className="flex-1 relative">
+                                      <Input
+                                        type={visibleKeys[vc.id] ? 'text' : 'password'}
+                                        value={vc.apiKey}
+                                        onChange={(e) => updateApiConfig(vc.id, { apiKey: e.target.value })}
+                                        placeholder="sk-..."
+                                        className="h-9 text-sm font-mono pr-20"
+                                      />
+                                      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                                        <Button type="button" variant="ghost" size="icon" className="h-6 w-6" onClick={() => toggleKeyVisibility(vc.id)}>
+                                          {visibleKeys[vc.id] ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                                        </Button>
+                                        <Button type="button" variant="ghost" size="icon" className="h-6 w-6" onClick={() => handleCopyKey(vc.apiKey)} disabled={!vc.apiKey}>
+                                          <Copy className="size-3.5" />
+                                        </Button>
+                                      </div>
+                                    </div>
+                                    <Button
+                                      onClick={() => handleVerify(vc.id)}
+                                      variant="default"
+                                      size="sm"
+                                      className="h-9"
+                                      disabled={verifyingId === vc.id}
+                                    >
+                                      <RefreshCw className={`size-3.5 mr-1.5 ${verifyingId === vc.id ? 'animate-spin' : ''}`} />
+                                      {verifyingId === vc.id ? '加载中...' : '验证并加载模型'}
+                                    </Button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+                    {tab.id !== 'video' && (
+                      <>
                     {/* Primary API Config */}
                     <div className="space-y-4 p-4 rounded-lg bg-muted/30 border border-border/40">
                       <div className="flex items-center justify-between">
@@ -754,6 +825,8 @@ export default function ApiPage() {
                         </div>
                       </div>
                     )}
+                      </>
+                    )}
 
                     {/* Model Library */}
                     <div className="space-y-4">
@@ -763,6 +836,7 @@ export default function ApiPage() {
                           <span className="text-xs text-muted-foreground">
                             待确认 {tabTotalCount - tabActiveCount} / {tabTotalCount} · 已生效 {tabActiveCount} 个
                             {tab.id === 'custom' && ' · 多接口共用'}
+                            {tab.id === 'video' && ' · 可灵 + 即梦 共用'}
                           </span>
                         </div>
                       </div>

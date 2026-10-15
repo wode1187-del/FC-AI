@@ -1,9 +1,9 @@
-import { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { scopedStorage, logger } from '@lark-apaas/client-toolkit-lite';
 import { toast } from 'sonner';
 import { removeBackgroundLocal } from '@/lib/removeBg';
 import type { IProject, ITask, IApiConfig, IModel, IPreset, ITextOptimizeConfig, IGenerateResult } from '@/data/models';
-import { getFeatureTemplate, isVideoModel, VIDEO_MODELS } from '@/data/featureTemplates';
+import { getFeatureTemplate, isVideoModel, VIDEO_MODELS, getVideoDurationLimit } from '@/data/featureTemplates';
 import type { IFeatureTemplate } from '@/data/featureTemplates';
 import {
   MOCK_PROJECTS,
@@ -151,7 +151,7 @@ interface AppContextType {
   projectTasks: ITask[];
   tasks: ITask[];
   taskStats: TaskStats;
-  addTask: (params?: Partial<ITask>) => void;
+  addTask: (params?: Partial<ITask>) => string;
   removeTask: (taskId: string) => void;
   updateTask: (taskId: string, updates: Partial<ITask>) => void;
   applyParamsToAll: (params: Partial<ITask>) => void;
@@ -204,6 +204,51 @@ export function useApp() {
   const ctx = useContext(AppContext);
   if (!ctx) throw new Error('useApp must be used within AppProvider');
   return ctx;
+}
+
+// 错误分类：把原始错误串归类为可读文案 + 修复建议（②）
+function classifyError(raw: string): { label: string; advice: string } {
+  const s = raw.toLowerCase();
+  if (/\b401\b/.test(s) || s.includes('unauthorized') || s.includes('invalid api key') || s.includes('鉴权失败')) {
+    return { label: '鉴权失败', advice: 'API 密钥无效或已过期：请到「API接口」页更换密钥并重新验证' };
+  }
+  if (/\b403\b/.test(s) || s.includes('forbidden') || s.includes('not allowed')) {
+    return { label: '无权限 / 额度不足', advice: '该模型可能不在当前账号/套餐内，或额度不足：请检查账号权限或切换模型' };
+  }
+  if (/\b429\b/.test(s) || s.includes('rate limit') || s.includes('too many requests') || s.includes('请求过于频繁')) {
+    return { label: '请求过频（限流）', advice: '请稍等 1-2 分钟再重试，避免连续多次生成触发上游限流' };
+  }
+  if (/\b451\b/.test(s) || s.includes('content_policy') || s.includes('content policy') || s.includes('safety')) {
+    return { label: '内容触发安全审核', advice: '请简化/调整提示词，避免敏感描述后重试' };
+  }
+  if (/\bhttp 5\d\d\b/.test(s) || s.includes('503') || s.includes('502') || s.includes('500') || s.includes('无可用渠道') || s.includes('no available')) {
+    return { label: '上游渠道暂不可用', advice: '请稍后重试；若持续，请到「API接口」页切换渠道或模型' };
+  }
+  if (s.includes('超时') || s.includes('timeout') || s.includes('abort')) {
+    return { label: '请求超时', advice: '大图/高质量生成耗时较长，API 可能仍在后台处理（或已扣费）。可降低分辨率/质量后重试，或稍后在 API 后台查看' };
+  }
+  if (s.includes('网络错误') || s.includes('cors') || s.includes('failed to fetch') || s.includes('network')) {
+    return { label: '网络 / CORS 问题', advice: '检查 API 地址是否正确，或使用代理/服务端转发，或让 API 服务开启 CORS' };
+  }
+  if (s.includes('未找到可用')) {
+    return { label: '未配置 API', advice: '请先在「API接口」页配置并验证对应模型接口' };
+  }
+  return { label: '生成失败', advice: '请检查 API 配置与网络；若持续出现，请提供原始错误信息反馈' };
+}
+
+// 查询任务状态时网络抖动自动重试（⑧）
+async function fetchJsonWithRetry(fn: () => Promise<Response>, retries = 3): Promise<{ ok: boolean; json: any }> {
+  let last: unknown = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const r = await fn();
+      return { ok: r.ok, json: await r.json().catch(() => ({})) };
+    } catch (e) {
+      last = e;
+      if (i < retries) await new Promise(r => setTimeout(r, 1200));
+    }
+  }
+  throw last;
 }
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
@@ -429,7 +474,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       index: maxIndex + 1,
       enabled: true,
       status: 'pending',
-      referenceImages: [],
+      referenceImages: merged.referenceImages ?? [],
       prompt: merged.prompt ?? '',
       negativePrompt: merged.negativePrompt,
       model: merged.model ?? defaultModel?.id ?? 'gpt-image-2',
@@ -445,6 +490,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
     setTasks(prev => [...prev, newTask]);
     setProjects(prev => prev.map(p => p.id === currentProjectId ? { ...p, taskCount: p.taskCount + 1 } : p));
+    return newTask.id;
   }, [currentProjectId, activeModels, tasks, newTaskParams]);
 
   const removeTask = useCallback((taskId: string) => {
@@ -494,7 +540,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }));
   }, [currentProjectId]);
 
-  // 一键应用功能模板：载入预置提示词 + 自动推荐模型 + 默认参数（免填关键词）
+  // 模型是否可用：其所属 API 配置已验证通过（内置按 apiType 匹配，自定义按 apiConfigId 匹配）
+  const hasUsableApi = useCallback((modelId: string): boolean => {
+    const mi = allModels.find(m => m.id === modelId);
+    if (!mi) return false;
+    if (mi.isCustom && mi.apiConfigId) {
+      return apiConfigs.some(c => c.id === mi.apiConfigId && !!c.baseUrl && !!c.apiKey && c.status === 'verified');
+    }
+    if (mi.apiType === 'custom') {
+      // 内置 custom 类型模型（如 flux 系列）：任一自定义兼容接口验证通过即可用
+      return apiConfigs.some(c => c.type === 'custom' && !!c.baseUrl && !!c.apiKey && c.status === 'verified');
+    }
+    if (mi.apiType) {
+      return apiConfigs.some(c => c.type === mi.apiType && !!c.baseUrl && !!c.apiKey && c.status === 'verified');
+    }
+    return false;
+  }, [allModels, apiConfigs]);
+
+  // 从模型档位中找 2K · 3:4（无 2K 3:4 时回落该模型最高 3:4 档；都没有返回 undefined 保持模板比例）
+  const resolve2K34Ratio = useCallback((modelId: string): string | undefined => {
+    const key = matchModelPresetKey(modelId);
+    const res = key ? (MODEL_RESOLUTIONS[key] || MODEL_RESOLUTIONS['flux-1.1-pro']) : (MODEL_RESOLUTIONS['flux-1.1-pro'] || []);
+    if (!Array.isArray(res) || res.length === 0) return undefined;
+    const r2k34 = res.find(r => r.includes('2K') && r.includes('3:4'));
+    if (r2k34) return r2k34;
+    const r34 = res.filter(r => r.includes('3:4'));
+    return r34.length > 0 ? r34[r34.length - 1] : undefined;
+  }, []);
+
+  // 一键应用功能模板：载入预置提示词 + 自动推荐模型（按已配置 API 适配）+ 默认参数（免填关键词）
   const applyFeature = useCallback((featureId: string): IFeatureTemplate | null => {
     const tpl = getFeatureTemplate(featureId);
     if (!tpl) return null;
@@ -507,11 +581,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           : [...prev, ...VIDEO_MODELS.filter(vm => !prev.some(p => p.id === vm.id))],
       );
     }
+    // 自动预设合适模型：推荐模型对应 API 未配置时，按 customModels 依次找第一个可用的；都没有则退回推荐模型
+    let modelId = tpl.recommendedModel;
+    if (!isVideo) {
+      const candidates = [tpl.recommendedModel, ...(tpl.customModels || [])];
+      modelId = candidates.find(m => hasUsableApi(m)) || tpl.recommendedModel;
+    }
     const modelLabel = isVideo
-      ? (VIDEO_MODELS.find(m => m.id === tpl.recommendedModel)?.name || tpl.recommendedModel)
-      : (MOCK_MODELS.find(m => m.id === tpl.recommendedModel)?.name || tpl.recommendedModel);
+      ? (VIDEO_MODELS.find(m => m.id === modelId)?.name || modelId)
+      : (allModels.find(m => m.id === modelId)?.name || modelId);
+    // 尺寸统一预设 2K · 3:4（图片功能；视频功能保持模板比例）
+    let ratio = tpl.params.ratio;
+    if (!isVideo && tpl.mode !== 'library') {
+      ratio = resolve2K34Ratio(modelId) ?? ratio;
+    }
     const update: Partial<ITask> = {
-      model: tpl.recommendedModel,
+      model: modelId,
       modelLabel,
       prompt: tpl.prompt,
       negativePrompt: tpl.negativePrompt || undefined,
@@ -519,39 +604,78 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       background: tpl.params.background,
       featureId: tpl.id,
     };
-    if (tpl.params.ratio) update.ratio = tpl.params.ratio;
+    if (ratio) update.ratio = ratio;
     if (tpl.params.quality) update.quality = tpl.params.quality;
     if (tpl.params.duration) update.duration = tpl.params.duration;
     // 所有功能模板点击后都自动创建任务行，让用户直接看到对应的任务条
     addTask(update);
     return tpl;
-  }, [applyParamsToAll, addTask, setNewTaskParamsState]);
+  }, [applyParamsToAll, addTask, setNewTaskParamsState, hasUsableApi, resolve2K34Ratio, allModels]);
 
   // 根据模型 ID 查找对应的 API 配置
+  // ⑦ ref 同步最新 tasks：消除生成函数闭包读旧 state 的竞态
+  const tasksRef = useRef<ITask[]>(tasks);
+  tasksRef.current = tasks;
+  // ① 全局单并发锁：同一时刻只允许一个生成请求在途（防上游限流、防多任务并发重复扣费）
+  const generatingRef = useRef(false);
+  // ③ 渠道健康：各 API 渠道连续失败计数与冷却
+  const [channelHealth, setChannelHealth] = useState<Record<string, { fails: number; cooldownUntil: number }>>({});
+  const markChannelHealthy = useCallback((cfgId: string) => {
+    if (!cfgId) return;
+    setChannelHealth(prev => (prev[cfgId] && prev[cfgId].fails > 0) ? { ...prev, [cfgId]: { fails: 0, cooldownUntil: 0 } } : prev);
+  }, []);
+  const markChannelUnhealthy = useCallback((cfgId: string) => {
+    if (!cfgId) return;
+    setChannelHealth(prev => {
+      const cur = prev[cfgId] || { fails: 0, cooldownUntil: 0 };
+      const fails = cur.fails + 1;
+      // 连续 3 次失败冷却 2 分钟，之后自动恢复尝试
+      const cooldownUntil = fails >= 3 ? Date.now() + 120000 : cur.cooldownUntil;
+      return { ...prev, [cfgId]: { fails, cooldownUntil } };
+    });
+  }, []);
+
   const findApiConfigForModel = useCallback((modelId: string): IApiConfig | null => {
+    // 渠道是否健康（未冷却）
+    const isHealthy = (c: IApiConfig) => {
+      const h = channelHealth[c.id];
+      if (!h || h.fails < 3) return true;
+      return Date.now() >= h.cooldownUntil;
+    };
     // 1. 先在 allModels 中查找，有 apiConfigId 的直接匹配
     const modelInfo = allModels.find(m => m.id === modelId);
+    const candidates: IApiConfig[] = [];
     if (modelInfo?.apiConfigId) {
       const cfg = apiConfigs.find(c => c.id === modelInfo.apiConfigId);
-      if (cfg?.baseUrl && cfg?.apiKey) return cfg;
+      if (cfg?.baseUrl && cfg?.apiKey) candidates.push(cfg);
     }
 
     // 2. 内置模型：根据 apiType 匹配对应类型的已配置 API
     if (modelInfo?.apiType && modelInfo.apiType !== 'custom') {
-      const cfg = apiConfigs.find(c => c.type === modelInfo.apiType && c.baseUrl && c.apiKey && c.status === 'verified');
-      if (cfg) return cfg;
+      const cfgs = apiConfigs.filter(c => c.type === modelInfo.apiType && c.baseUrl && c.apiKey && c.status === 'verified');
+      cfgs.forEach(cfg => { if (!candidates.some(x => x.id === cfg.id)) candidates.push(cfg); });
     }
 
     // 3. 兜底：找第一个已验证且有 baseUrl/apiKey 的配置
-    const fallback = apiConfigs.find(c => c.baseUrl && c.apiKey && c.status === 'verified');
-    return fallback || null;
-  }, [allModels, apiConfigs]);
+    if (candidates.length === 0) {
+      const fb = apiConfigs.find(c => c.baseUrl && c.apiKey && c.status === 'verified');
+      if (fb) candidates.push(fb);
+    }
+    // ③ 优先健康渠道；全部冷却则退回第一个（避免永久无渠道）
+    return candidates.find(isHealthy) || candidates[0] || null;
+  }, [allModels, apiConfigs, channelHealth]);
 
 
   // ---- Generate ----
   const generateTask = useCallback(async (taskId: string, append = false) => {
-    const task = tasks.find(t => t.id === taskId);
+    const task = tasksRef.current.find(t => t.id === taskId);
     if (!task || !task.prompt.trim()) return;
+    // ① 全局单并发锁：在途生成时拒绝新的，提示排队
+    if (generatingRef.current) {
+      toast.warning('已有生成任务进行中，请稍候或等待队列完成后再操作');
+      return;
+    }
+    generatingRef.current = true;
 
     // 追加模式：记录本次追加张数，更新总张数用于占位框显示
     const appendCount = task.imageCount || 1;
@@ -2760,6 +2884,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         height,
       }));
 
+      if (apiConfig) markChannelHealthy(apiConfig.id);
       setTasks(prev => prev.map(t => {
         if (t.id === taskId) {
           const combinedResults = append ? [...t.results, ...newResults] : newResults;
@@ -2788,8 +2913,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }));
       logger.error('Generate failed:', errorMsg);
 
-      // 拼接错误信息：主信息 + 完整响应原文（如果有）
-      let displayError = errorMsg || '生成失败，请检查API配置';
+      // ② 错误分类：归类为可读文案 + 修复建议
+      const cls = classifyError(`${errorMsg}\n${lastError || ''}`);
+      // ③ 渠道自动规避：5xx / 网络 / CORS / 无渠道 类错误标记该渠道不健康（冷却后自动恢复）
+      const errCombined = `${lastError || ''} ${errorMsg}`;
+      if (apiConfig && (/\bhttp 5\d\d\b/i.test(errCombined) || /网络错误|CORS|failed to fetch|无可用渠道/i.test(errCombined))) {
+        markChannelUnhealthy(apiConfig.id);
+      }
+
+      // 拼接错误信息：分类标签 + 原始信息 + 修复建议 + 完整响应原文（如果有）
+      let displayError = `${cls.label}：${errorMsg}`;
+      if (cls.advice) displayError = `${displayError}\n\n💡 ${cls.advice}`;
       if (lastFullError && lastFullError !== errorMsg) {
         displayError = `${displayError}\n\n完整响应：${lastFullError}`;
       }
@@ -2801,8 +2935,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         completedAt: Date.now(),
         durationMs: Date.now() - (t.startedAt || generateStartTime),
       } : t));
+    } finally {
+      // ① 释放全局单并发锁
+      generatingRef.current = false;
     }
-  }, [tasks, apiConfigs, allModels, findApiConfigForModel]);
+  }, [tasksRef, apiConfigs, allModels, findApiConfigForModel, markChannelUnhealthy, markChannelHealthy]);
 
   const batchGenerate = useCallback(async (startIndex: number, endIndex: number, concurrency: number) => {
     const targetTasks = projectTasks
@@ -3054,8 +3191,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const generateVideoTask = useCallback(async (taskId: string) => {
-    const task = tasks.find(t => t.id === taskId);
+    const task = tasksRef.current.find(t => t.id === taskId);
     if (!task || !task.prompt.trim()) return;
+    // ① 全局单并发锁
+    if (generatingRef.current) {
+      toast.warning('已有生成任务进行中，请稍候或等待队列完成后再操作');
+      return;
+    }
+    generatingRef.current = true;
 
     const isKling = task.model.startsWith('kling');
     const apiType = isKling ? 'kling' : 'seedance';
@@ -3070,60 +3213,128 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     } : t));
 
     const startTime = Date.now();
-    const durationSec = Math.min(Math.max(task.duration || 5, 3), 15);
+    const durationLimit = getVideoDurationLimit(task.model);
+    const durationSec = Math.min(Math.max(task.duration || durationLimit.min, durationLimit.min), durationLimit.max);
     const qualityMode = task.quality?.includes('1080') || task.quality?.includes('高清') ? 'pro' : 'std';
     const ratioKey = task.ratio?.split(' ')[0] || '16:9';
+    // 视频参考源解析：外部 URL 直接使用；本地 blob/objectURL 转成 base64 data URL 兜底（可灵/中转可能限制大文件）
+    const resolveVideoSource = async (u: string): Promise<string> => {
+      if (/^https?:\/\//i.test(u)) return u;
+      try {
+        const r = await fetch(u);
+        const buf = new Uint8Array(await r.arrayBuffer());
+        const mime = r.headers.get('content-type') || 'video/mp4';
+        let bin = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < buf.length; i += chunk) {
+          bin += String.fromCharCode(...buf.subarray(i, i + chunk));
+        }
+        return `data:${mime};base64,${btoa(bin)}`;
+      } catch {
+        return u;
+      }
+    };
 
     try {
       let videoUrl = '';
       if (isKling) {
-        const hasImage = task.referenceImages.length > 0;
-        const endpoint = hasImage
-          ? `${apiConfig.baseUrl}/v1/videos/image2video`
-          : `${apiConfig.baseUrl}/v1/videos/text2video`;
-        const body: Record<string, unknown> = {
-          model_name: task.model === 'kling-v2-6' ? 'kling-v2-6' : 'kling-v3',
-          prompt: task.prompt,
-          negative_prompt: task.negativePrompt || '',
-          duration: String(durationSec),
-          mode: qualityMode,
-          sound: 'off',
-        };
-        if (hasImage) {
-          const img = await imageToBase64(task.referenceImages[0].url);
-          body.image = img.startsWith('data:') ? (img.split(',')[1] || img) : img;
-        } else {
-          body.ratio = ratioKey;
-        }
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.code !== 0 || !data.data?.task_id) {
-          throw new Error(data.message || `可灵请求失败 HTTP ${res.status}`);
-        }
-        const remoteId = data.data.task_id;
-        for (let i = 0; i < 120; i++) {
-          await new Promise(r => setTimeout(r, 5000));
-          const q = await fetch(`${apiConfig.baseUrl}/v1/videos/${remoteId}`, {
-            headers: { 'Authorization': `Bearer ${apiConfig.apiKey}` },
+        const toB64 = (s: string) => (s.startsWith('data:') ? (s.split(',')[1] || s) : s);
+        const hasVideo = !!task.videoRefUrl;
+        if (hasVideo) {
+          // 动作跟随：可灵「动作控制」（形象图 image_url + 参考视频 video_url）
+          const body: Record<string, unknown> = {
+            model_name: task.model === 'kling-v2-6' ? 'kling-v2-6' : 'kling-v3',
+            prompt: task.prompt,
+            image_url: toB64(await imageToBase64(task.referenceImages[0]?.url ?? '')),
+            video_url: await resolveVideoSource(task.videoRefUrl ?? ''),
+            keep_original_sound: task.videoKeepSound ? 'yes' : 'no',
+            character_orientation: task.videoOrientation || 'image',
+            mode: task.videoMode || qualityMode,
+          };
+          const res = await fetch(`${apiConfig.baseUrl}/v1/videos/motion-control`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
           });
-          const qd = await q.json().catch(() => ({}));
-          const st = qd.data?.task_status;
-          if (st === 'succeed') {
-            videoUrl = qd.data?.task_result?.videos?.[0]?.url || '';
-            break;
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.code !== 0 || !data.data?.task_id) {
+            throw new Error(data.message || `可灵动作跟随请求失败 HTTP ${res.status}`);
           }
-          if (st === 'failed') throw new Error('可灵生成失败：' + (qd.data?.task_status_msg || '未知错误'));
+          const remoteId = data.data.task_id;
+          for (let i = 0; i < 120; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            const { json: qd } = await fetchJsonWithRetry(() => fetch(`${apiConfig.baseUrl}/v1/videos/motion-control/${remoteId}`, {
+              headers: { 'Authorization': `Bearer ${apiConfig.apiKey}` },
+            }));
+            const st = qd.data?.task_status;
+            if (st === 'succeed') {
+              videoUrl = qd.data?.task_result?.videos?.[0]?.url || '';
+              break;
+            }
+            if (st === 'failed') throw new Error('可灵动作跟随失败：' + (qd.data?.task_status_msg || '未知错误'));
+          }
+          if (!videoUrl) throw new Error('动作跟随生成超时，请稍后重试');
+        } else {
+          const hasImage = task.referenceImages.length > 0;
+          const endpoint = hasImage
+            ? `${apiConfig.baseUrl}/v1/videos/image2video`
+            : `${apiConfig.baseUrl}/v1/videos/text2video`;
+          const body: Record<string, unknown> = {
+            model_name: task.model === 'kling-v2-6' ? 'kling-v2-6' : 'kling-v3',
+            prompt: task.prompt,
+            negative_prompt: task.negativePrompt || '',
+            duration: String(durationSec),
+            mode: qualityMode,
+            sound: 'off',
+          };
+          if (hasImage) {
+            // 首帧：第 1 张参考图
+            body.image = toB64(await imageToBase64(task.referenceImages[0].url));
+            // 尾帧：首尾帧上传 endImageUrl 优先，其次第 2 张参考图
+            const endFrameUrl = task.endImageUrl || task.referenceImages[1]?.url;
+            if (endFrameUrl) {
+              body.end_image = toB64(await imageToBase64(endFrameUrl));
+            }
+          } else {
+            body.ratio = ratioKey;
+          }
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${apiConfig.apiKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.code !== 0 || !data.data?.task_id) {
+            throw new Error(data.message || `可灵请求失败 HTTP ${res.status}`);
+          }
+          const remoteId = data.data.task_id;
+          for (let i = 0; i < 120; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            const { json: qd } = await fetchJsonWithRetry(() => fetch(`${apiConfig.baseUrl}/v1/videos/${remoteId}`, {
+              headers: { 'Authorization': `Bearer ${apiConfig.apiKey}` },
+            }));
+            const st = qd.data?.task_status;
+            if (st === 'succeed') {
+              videoUrl = qd.data?.task_result?.videos?.[0]?.url || '';
+              break;
+            }
+            if (st === 'failed') throw new Error('可灵生成失败：' + (qd.data?.task_status_msg || '未知错误'));
+          }
+          if (!videoUrl) throw new Error('视频生成超时，请稍后重试');
         }
-        if (!videoUrl) throw new Error('视频生成超时，请稍后重试');
       } else {
         // 即梦 Seedance（火山方舟）
         const content: Record<string, unknown>[] = [];
         if (task.referenceImages.length > 0) {
-          content.push({ type: 'image', data: await imageToBase64(task.referenceImages[0].url) });
+          // 多张参考图全部作为首尾/过渡帧输入，提升运动可控性
+          for (const refImg of task.referenceImages) {
+            const b = await imageToBase64(refImg.url);
+            content.push({ type: 'image', data: b.startsWith('data:') ? (b.split(',')[1] || b) : b });
+          }
+        }
+        // 全能替换/视频编辑：参考视频作为 video 内容类型传入
+        if (task.videoRefUrl) {
+          content.push({ type: 'video', data: await resolveVideoSource(task.videoRefUrl ?? '') });
         }
         content.push({ type: 'text', text: task.prompt });
         const res = await fetch(`${apiConfig.baseUrl}/api/plan/v3/contents/generations/tasks`, {
@@ -3133,7 +3344,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             model: 'doubao-seedance-2-5-260628',
             content,
             ratio: ratioKey,
-            duration: Math.min(Math.max(durationSec, 4), 15),
+            duration: Math.min(Math.max(durationSec, durationLimit.min), durationLimit.max),
             watermark: false,
           }),
         });
@@ -3142,10 +3353,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (!res.ok || !remoteId) throw new Error(data.error?.message || data.message || `即梦请求失败 HTTP ${res.status}`);
         for (let i = 0; i < 120; i++) {
           await new Promise(r => setTimeout(r, 5000));
-          const q = await fetch(`${apiConfig.baseUrl}/api/plan/v3/contents/generations/tasks/${remoteId}`, {
+          const { json: qd } = await fetchJsonWithRetry(() => fetch(`${apiConfig.baseUrl}/api/plan/v3/contents/generations/tasks/${remoteId}`, {
             headers: { 'Authorization': `Bearer ${apiConfig.apiKey}` },
-          });
-          const qd = await q.json().catch(() => ({}));
+          }));
           if (qd.status === 'succeeded') {
             videoUrl = qd.content?.video_url || '';
             break;
@@ -3166,15 +3376,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         type: 'video',
         duration: durationSec,
       };
+      if (apiConfig) markChannelHealthy(apiConfig.id);
       setTasks(prev => prev.map(t => t.id === taskId ? {
         ...t, status: 'completed', completedAt: Date.now(), durationMs: Date.now() - startTime,
         results: [...t.results, newResult].slice(0, 20),
       } : t));
     } catch (e) {
       const msg = String(e instanceof Error ? e.message : e);
+      // ③ 视频失败 5xx/网络类错误也冷却该渠道
+      if (apiConfig && (/\bhttp 5\d\d\b/i.test(msg) || /网络错误|CORS|failed to fetch|超时/.test(msg))) {
+        markChannelUnhealthy(apiConfig.id);
+      }
       setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'failed', errorMsg: msg, completedAt: Date.now(), durationMs: Date.now() - startTime } : t));
+    } finally {
+      generatingRef.current = false;
     }
-  }, [tasks, apiConfigs, updateTask, setTasks]);
+  }, [tasksRef, apiConfigs, updateTask, setTasks, generatingRef, markChannelHealthy, markChannelUnhealthy]);
 
   const verifyApiConfig = useCallback(async (id: string): Promise<boolean> => {
     const config = apiConfigs.find(c => c.id === id);

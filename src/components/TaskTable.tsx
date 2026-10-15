@@ -49,6 +49,15 @@ import {
    AlertCircle,
    Copy,
    Palette,
+   Film,
+   Upload,
+   ChevronsLeftRight,
+   Save,
+   Layers,
+   History,
+   Loader2,
+   Clapperboard,
+   RotateCcw,
  } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -76,7 +85,8 @@ import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
 import MaskEditor from '@/components/MaskEditor';
 import { useApp } from '@/context/AppContext';
-import { isVideoModel, getFeatureTemplate } from '@/data/featureTemplates';
+import { isVideoModel, getFeatureTemplate, getVideoDurationLimit } from '@/data/featureTemplates';
+import { VIDEO_PROMPT_PRESETS, IMAGE_PROMPT_PRESETS } from '@/data/promptPresets';
 import { getResolutionGroups, type ITask } from '@/data/models';
 import type { ITextOptimizeConfig } from '@/data/models';
 import { useNavigate } from 'react-router-dom';
@@ -137,6 +147,46 @@ const TaskPromptCell = memo(function TaskPromptCell({
   }, [localPrompt, modifyOptions]);
   const [optimizeInput, setOptimizeInput] = useState('');
   const [showOptimize, setShowOptimize] = useState(false);
+  const [videoPresetCat, setVideoPresetCat] = useState('person');
+  const [imagePresetCat, setImagePresetCat] = useState('angle');
+  const [presetSearch, setPresetSearch] = useState('');
+  const [favoritePresets, setFavoritePresets] = useState<{ name: string; prompt: string; kind: 'video' | 'image' }[]>(() => {
+    try { const raw = scopedStorage.getItem('fc_ai_preset_favorites_v1'); return raw ? JSON.parse(raw) : []; } catch { return []; }
+  });
+  const toggleFav = useCallback((name: string, prompt: string, kind: 'video' | 'image') => {
+    setFavoritePresets(prev => {
+      const exists = prev.find(f => f.prompt === prompt && f.kind === kind);
+      const next = exists ? prev.filter(f => !(f.prompt === prompt && f.kind === kind)) : [...prev, { name, prompt, kind }];
+      try { scopedStorage.setItem('fc_ai_preset_favorites_v1', JSON.stringify(next)); } catch { /* 忽略 */ }
+      toast.info(exists ? '已取消收藏' : `已收藏「${name}」`);
+      return next;
+    });
+  }, []);
+
+  const [customPresets, setCustomPresets] = useState<{ id: string; name: string; prompt: string; kind: 'video' | 'image' }[]>(() => {
+    try { const raw = scopedStorage.getItem('fc_ai_custom_presets_v1'); return raw ? JSON.parse(raw) : []; } catch { return []; }
+  });
+  const [customName, setCustomName] = useState('');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const addCustomPreset = useCallback((kind: 'video' | 'image') => {
+    const name = customName.trim(); const prompt = customPrompt.trim();
+    if (!name || !prompt) { toast.warning('请填写预设名称和提示词'); return; }
+    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, prompt, kind };
+    setCustomPresets(prev => {
+      const next = [...prev, item];
+      try { scopedStorage.setItem('fc_ai_custom_presets_v1', JSON.stringify(next)); } catch { /* 忽略 */ }
+      return next;
+    });
+    setCustomName(''); setCustomPrompt('');
+    toast.success(`已添加自定义预设「${name}」`);
+  }, [customName, customPrompt]);
+  const removeCustomPreset = useCallback((id: string) => {
+    setCustomPresets(prev => {
+      const next = prev.filter(p => p.id !== id);
+      try { scopedStorage.setItem('fc_ai_custom_presets_v1', JSON.stringify(next)); } catch { /* 忽略 */ }
+      return next;
+    });
+  }, []);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const debounceTimer = useRef<number | null>(null);
 
@@ -564,6 +614,159 @@ const TaskPromptCell = memo(function TaskPromptCell({
           className="min-h-[80px] text-xs resize-none"
         />
       )}
+      {/* 视频提示词预设（人物/产品/品类/运镜），点击即填入 */}
+      {isVideoModel(task.model) && (
+        <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+              <Film className="size-3 text-primary" />视频提示词预设
+            </span>
+            <span className="text-[9px] text-muted-foreground">点击填入，可再 AI 扩写或微调</span>
+          </div>
+          <div className="flex gap-1 flex-wrap">
+            <button onClick={() => setVideoPresetCat('fav')}
+              className={`h-6 px-2 rounded text-[10px] border transition-colors ${videoPresetCat === 'fav' ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+              ★ 收藏
+            </button>
+            <button onClick={() => setVideoPresetCat('custom')}
+              className={`h-6 px-2 rounded text-[10px] border transition-colors ${videoPresetCat === 'custom' ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+              ＋ 自定义
+            </button>
+            {VIDEO_PROMPT_PRESETS.map(g => (
+              <button key={g.id} onClick={() => setVideoPresetCat(g.id)}
+                className={`h-6 px-2 rounded text-[10px] border transition-colors ${videoPresetCat === g.id ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+                {g.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-1 max-h-[120px] overflow-y-auto">
+            <Input
+              value={presetSearch}
+              onChange={(e) => setPresetSearch(e.target.value)}
+              placeholder="搜索预设（如：环绕、特写、服装、氛围）"
+              className="h-6 text-[11px]"
+            />
+            {(videoPresetCat === 'fav'
+              ? favoritePresets.filter(f => f.kind === 'video').map(f => ({ id: f.prompt, name: f.name, prompt: f.prompt }))
+              : videoPresetCat === 'custom'
+                ? customPresets.filter(f => f.kind === 'video')
+                : VIDEO_PROMPT_PRESETS.find(g => g.id === videoPresetCat)?.items || []
+            )
+              .filter(it => !presetSearch.trim() || it.name.includes(presetSearch.trim()) || it.prompt.includes(presetSearch.trim()))
+              .map(item => (
+              <button
+                key={item.id}
+                onClick={() => {
+                  setLocalPrompt(item.prompt);
+                  updateTask(task.id, { prompt: item.prompt });
+                  setOptimizeInput(item.prompt);
+                  setShowOptimize(true);
+                  toast.info(`已填入「${item.name}」提示词`, { description: '可直接生成，或点 AI 优化扩写' });
+                }}
+                title={item.prompt}
+                className="h-6 px-2.5 rounded-full border border-border/60 bg-card/50 text-[10px] text-foreground/90 hover:border-primary/40 hover:bg-primary/5 transition-colors whitespace-nowrap"
+              >
+                {item.name}
+                <span
+                  className={`ml-1.5 ${favoritePresets.some(f => f.prompt === item.prompt && f.kind === 'video') ? 'text-amber-500' : 'text-muted-foreground/60 hover:text-amber-400'}`}
+                  onClick={(e) => { e.stopPropagation(); toggleFav(item.name, item.prompt, 'video'); }}
+                  title="收藏/取消收藏"
+                >
+                  {favoritePresets.some(f => f.prompt === item.prompt && f.kind === 'video') ? '★' : '☆'}
+                </span>
+                {videoPresetCat === 'custom' && (
+                  <span className="ml-1.5 text-muted-foreground/60 hover:text-destructive" onClick={(e) => { e.stopPropagation(); removeCustomPreset(item.id); }} title="删除自定义预设">×</span>
+                )}
+              </button>
+            ))}
+          </div>
+          {videoPresetCat === 'custom' && (
+            <div className="space-y-1.5 border-t border-border/40 pt-1.5">
+              <Input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="预设名称（如：新品揭幕）" className="h-6 text-[11px]" />
+              <Input value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} placeholder="专业提示词描述…" className="h-6 text-[11px]" />
+              <Button size="sm" variant="outline" className="h-6 text-[10px] w-full bg-background hover:bg-accent" onClick={() => addCustomPreset('video')}>
+                <Plus className="size-3 mr-1" />添加自定义预设
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {/* 图片提示词预设（角度/场景/姿势/风格），点击追加 */}
+      {!isVideoModel(task.model) && (
+        <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+              <Layers className="size-3 text-primary" />图片提示词预设
+            </span>
+            <span className="text-[9px] text-muted-foreground">点击追加到提示词</span>
+          </div>
+          <div className="flex gap-1 flex-wrap">
+            <button onClick={() => setImagePresetCat('fav')}
+              className={`h-6 px-2 rounded text-[10px] border transition-colors ${imagePresetCat === 'fav' ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+              ★ 收藏
+            </button>
+            <button onClick={() => setImagePresetCat('custom')}
+              className={`h-6 px-2 rounded text-[10px] border transition-colors ${imagePresetCat === 'custom' ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+              ＋ 自定义
+            </button>
+            {IMAGE_PROMPT_PRESETS.map(g => (
+              <button key={g.id} onClick={() => setImagePresetCat(g.id)}
+                className={`h-6 px-2 rounded text-[10px] border transition-colors ${imagePresetCat === g.id ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+                {g.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-1 max-h-[120px] overflow-y-auto">
+            <Input
+              value={presetSearch}
+              onChange={(e) => setPresetSearch(e.target.value)}
+              placeholder="搜索预设（如：棚拍、走秀、高级质感）"
+              className="h-6 text-[11px]"
+            />
+            {(imagePresetCat === 'fav'
+              ? favoritePresets.filter(f => f.kind === 'image').map(f => ({ id: f.prompt, name: f.name, prompt: f.prompt }))
+              : imagePresetCat === 'custom'
+                ? customPresets.filter(f => f.kind === 'image')
+                : IMAGE_PROMPT_PRESETS.find(g => g.id === imagePresetCat)?.items || []
+            )
+              .filter(it => !presetSearch.trim() || it.name.includes(presetSearch.trim()) || it.prompt.includes(presetSearch.trim()))
+              .map(item => (
+              <button
+                key={item.id}
+                onClick={() => {
+                  const next = localPrompt.trim() ? `${localPrompt}，${item.prompt}` : item.prompt;
+                  setLocalPrompt(next);
+                  updateTask(task.id, { prompt: next });
+                  toast.info(`已追加「${item.name}」`);
+                }}
+                title={item.prompt}
+                className="h-6 px-2.5 rounded-full border border-border/60 bg-card/50 text-[10px] text-foreground/90 hover:border-primary/40 hover:bg-primary/5 transition-colors whitespace-nowrap"
+              >
+                {item.name}
+                <span
+                  className={`ml-1.5 ${favoritePresets.some(f => f.prompt === item.prompt && f.kind === 'image') ? 'text-amber-500' : 'text-muted-foreground/60 hover:text-amber-400'}`}
+                  onClick={(e) => { e.stopPropagation(); toggleFav(item.name, item.prompt, 'image'); }}
+                  title="收藏/取消收藏"
+                >
+                  {favoritePresets.some(f => f.prompt === item.prompt && f.kind === 'image') ? '★' : '☆'}
+                </span>
+                {imagePresetCat === 'custom' && (
+                  <span className="ml-1.5 text-muted-foreground/60 hover:text-destructive" onClick={(e) => { e.stopPropagation(); removeCustomPreset(item.id); }} title="删除自定义预设">×</span>
+                )}
+              </button>
+            ))}
+          </div>
+          {imagePresetCat === 'custom' && (
+            <div className="space-y-1.5 border-t border-border/40 pt-1.5">
+              <Input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="预设名称（如：柔光商业精修）" className="h-6 text-[11px]" />
+              <Input value={customPrompt} onChange={(e) => setCustomPrompt(e.target.value)} placeholder="专业提示词描述…" className="h-6 text-[11px]" />
+              <Button size="sm" variant="outline" className="h-6 text-[10px] w-full bg-background hover:bg-accent" onClick={() => addCustomPreset('image')}>
+                <Plus className="size-3 mr-1" />添加自定义预设
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       {task.featureId !== 'shoot-3d' && task.featureId !== 'shoot-iron' && task.featureId !== 'shoot-flat' && task.featureId !== 'design-recolor' && task.featureId !== 'design-upscale' && task.featureId !== 'design-fabric' && task.featureId !== 'shoot-tryon' && task.featureId !== 'shoot-bg' && task.featureId !== 'shoot-model-swap' && task.featureId !== 'shoot-pose' && (
       <div className="border border-border/50 rounded-md p-2 bg-muted/30 space-y-2">
         <div className="flex items-center justify-between">
@@ -828,9 +1031,39 @@ const TaskPromptCell = memo(function TaskPromptCell({
   );
 });
 
+// 我的模板：常用参数（模型+比例+质量+提示词）一键套用
+interface MyTemplate {
+  id: string;
+  name: string;
+  model: string;
+  ratio: string;
+  quality: string;
+  prompt: string;
+  negativePrompt?: string;
+  imageCount: number;
+  duration?: number;
+  createdAt: number;
+}
+const MY_TEMPLATE_KEY = 'fc_ai_my_templates_v1';
+
+// 生成历史：跨任务汇总条目
+interface HistoryItem {
+  taskId: string;
+  projectId: string;
+  taskIndex: number;
+  resultId: string;
+  resultIndex: number;
+  url: string;
+  modelName: string;
+  featureName: string;
+  type: 'image' | 'video';
+  createdAt: number;
+}
+
 export default function TaskTable() {
   const {
     currentProject,
+    projects,
     tasks,
     activeModels,
     getResolutionsForModel,
@@ -881,6 +1114,194 @@ export default function TaskTable() {
   const [editorImage, setEditorImage] = useState<{ taskId: string; imgIndex: number; url: string; name: string } | null>(null);
   // 蒙版编辑器
   const [maskEditor, setMaskEditor] = useState<{ taskId: string; url: string; name: string } | null>(null);
+  // 原图 vs 效果图对比弹窗
+  const [compare, setCompare] = useState<{ before: string; after: string; taskIndex: number; resultIdx: number } | null>(null);
+  const [comparePos, setComparePos] = useState(50);
+  const compareRef = useRef<HTMLDivElement>(null);
+  const updateComparePos = (e: React.PointerEvent<HTMLDivElement>) => {
+    const el = compareRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setComparePos(Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)));
+  };
+
+  // ===== 我的模板（localStorage 持久化）=====
+  const [myTemplates, setMyTemplates] = useState<MyTemplate[]>(() => {
+    try { return JSON.parse(localStorage.getItem(MY_TEMPLATE_KEY) || '[]'); } catch { return []; }
+  });
+  const persistTemplates = useCallback((list: MyTemplate[]) => {
+    setMyTemplates(list);
+    localStorage.setItem(MY_TEMPLATE_KEY, JSON.stringify(list));
+  }, []);
+  const saveCurrentAsTemplate = useCallback((task: ITask) => {
+    const name = window.prompt('模板名称：', `${task.modelLabel || task.model} 模板`);
+    if (!name) return;
+    persistTemplates([...myTemplates, {
+      id: `tpl_${Date.now()}`,
+      name: name.trim(),
+      model: task.model,
+      ratio: task.ratio,
+      quality: task.quality,
+      prompt: task.prompt,
+      negativePrompt: task.negativePrompt,
+      imageCount: task.imageCount,
+      duration: task.duration,
+      createdAt: Date.now(),
+    }]);
+    toast.success(`已保存模板「${name.trim()}」`);
+  }, [myTemplates, persistTemplates]);
+  const applyTemplate = useCallback((task: ITask, t: MyTemplate) => {
+    const modelLabel = activeModels.find(m => m.id === t.model)?.name || t.model;
+    updateTask(task.id, {
+      model: t.model, modelLabel,
+      ratio: t.ratio, quality: t.quality,
+      prompt: t.prompt,
+      negativePrompt: t.negativePrompt || undefined,
+      imageCount: t.imageCount,
+      ...(t.duration ? { duration: t.duration } : {}),
+    });
+    toast.success(`已应用模板「${t.name}」`);
+  }, [activeModels, updateTask]);
+  const removeTemplate = useCallback((id: string) => {
+    persistTemplates(myTemplates.filter(t => t.id !== id));
+  }, [myTemplates, persistTemplates]);
+
+  // ===== 多模型横向对比生成 =====
+  const [comparePick, setComparePick] = useState<string[]>([]);
+  const [compareQueue, setCompareQueue] = useState<string[]>([]);
+  const [compareCancel, setCompareCancel] = useState(false);
+  const [batchCancel, setBatchCancel] = useState(false);
+  const startCompareGenerate = useCallback((task: ITask, modelIds: string[]) => {
+    if (modelIds.length === 0) { toast.warning('请先勾选要对比的模型'); return; }
+    const base = {
+      prompt: task.prompt, negativePrompt: task.negativePrompt, ratio: task.ratio, quality: task.quality,
+      imageCount: task.imageCount, featureId: task.featureId, background: task.background, referenceImages: task.referenceImages,
+    };
+    const ids = modelIds.map(mid => {
+      const mi = activeModels.find(m => m.id === mid);
+      return addTask({ ...base, model: mid, modelLabel: mi?.name || mid });
+    });
+    setCompareQueue(ids);
+    toast.success(`已创建 ${ids.length} 个对比任务，按模型依次生成中`);
+  }, [activeModels, addTask]);
+  useEffect(() => {
+    if (compareCancel) { setCompareQueue([]); setCompareCancel(false); return; }
+    if (compareQueue.length === 0) return;
+    const head = tasks.find(t => t.id === compareQueue[0]);
+    if (!head) { setCompareQueue(prev => prev.slice(1)); return; }
+    if (head.status === 'generating') return; // 等当前模型完成
+    if (head.status === 'completed' || head.status === 'failed') { setCompareQueue(prev => prev.slice(1)); return; }
+    (async () => {
+      if (isVideoModel(head.model)) await generateVideoTask(head.id);
+      else await generateTask(head.id);
+    })();
+  }, [compareQueue, compareCancel, tasks, generateTask, generateVideoTask]);
+
+  // ===== 批量队列生成（背景/提示词变体 × 自动排队）=====
+  const [batchBg, setBatchBg] = useState('');
+  const [batchSuffix, setBatchSuffix] = useState('');
+  const [batchQueue, setBatchQueue] = useState<string[]>([]);
+  const startBatchGenerate = useCallback((task: ITask) => {
+    const bgs = batchBg.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    const suffixes = batchSuffix.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    if (bgs.length === 0 && suffixes.length === 0) { toast.warning('请至少填写背景或提示词变体'); return; }
+    const combos: { bg?: string; suffix: string }[] = [];
+    if (bgs.length && suffixes.length) { for (const bg of bgs) for (const sfx of suffixes) combos.push({ bg, suffix: sfx }); }
+    else if (bgs.length) { for (const bg of bgs) combos.push({ bg, suffix: '' }); }
+    else { for (const sfx of suffixes) combos.push({ bg: undefined, suffix: sfx }); }
+    const ids = combos.map(c => addTask({
+      prompt: `${task.prompt}${c.suffix ? `，${c.suffix}` : ''}`,
+      negativePrompt: task.negativePrompt,
+      ratio: task.ratio, quality: task.quality, imageCount: 1,
+      featureId: task.featureId, referenceImages: task.referenceImages,
+      model: task.model, modelLabel: task.modelLabel,
+      background: c.bg || task.background,
+    }));
+    setBatchQueue(ids);
+    toast.success(`已创建 ${ids.length} 个批量任务，自动排队生成`);
+  }, [batchBg, batchSuffix, addTask]);
+  useEffect(() => {
+    if (batchCancel) { setBatchQueue([]); setBatchCancel(false); return; }
+    if (batchQueue.length === 0) return;
+    const head = tasks.find(t => t.id === batchQueue[0]);
+    if (!head) { setBatchQueue(prev => prev.slice(1)); return; }
+    if (head.status === 'generating') return;
+    if (head.status === 'completed' || head.status === 'failed') { setBatchQueue(prev => prev.slice(1)); return; }
+    (async () => {
+      if (isVideoModel(head.model)) await generateVideoTask(head.id);
+      else await generateTask(head.id);
+    })();
+  }, [batchQueue, batchCancel, tasks, generateTask, generateVideoTask]);
+
+  // ⑤ 队列可取消开关（声明已前移）+ ④ 本轮完成统计
+  const runStats = useMemo(() => {
+    let done = 0, img = 0, vid = 0;
+    for (const t of tasks) {
+      if (t.status === 'completed') done++;
+      for (const r of t.results) {
+        if (r.type === 'video') vid++;
+        else img++;
+      }
+    }
+    return { done, img, vid };
+  }, [tasks]);
+
+  // ===== 生成历史（跨任务汇总 + 分类/搜索）=====
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyCat, setHistoryCat] = useState('all');
+  const [historyProject, setHistoryProject] = useState('all');
+  const historyItems = useMemo(() => {
+    const items: HistoryItem[] = [];
+    for (const t of tasks) {
+      t.results.forEach((r, idx) => {
+        const f = t.featureId ? getFeatureTemplate(t.featureId) : undefined;
+        const modelId = r.model || t.model;
+        items.push({
+          taskId: t.id, projectId: t.projectId, taskIndex: t.index, resultId: r.id, resultIndex: idx, url: r.url,
+          modelName: activeModels.find(m => m.id === modelId)?.name || modelId,
+          featureName: f?.name || '自定义',
+          type: r.type || 'image',
+          createdAt: r.createdAt || t.createdAt,
+        });
+      });
+    }
+    return items.sort((a, b) => b.createdAt - a.createdAt);
+  }, [tasks, activeModels]);
+  const historyCats = useMemo(() => ['all', 'video', ...Array.from(new Set(historyItems.map(i => i.featureName)))], [historyItems]);
+  const filteredHistory = useMemo(() => {
+    let list = historyItems;
+    if (historyProject !== 'all') list = list.filter(i => i.projectId === historyProject);
+    if (historyCat === 'video') list = list.filter(i => i.type === 'video');
+    else if (historyCat !== 'all') list = list.filter(i => i.featureName === historyCat);
+    if (historySearch.trim()) {
+      const q = historySearch.trim().toLowerCase();
+      list = list.filter(i => i.modelName.toLowerCase().includes(q) || i.featureName.toLowerCase().includes(q) || `#${i.taskIndex}`.includes(q));
+    }
+    return list;
+  }, [historyItems, historyCat, historyProject, historySearch]);
+
+  // ⑨ 生成历史：清空全部结果 / 导出 CSV
+  const clearAllResults = () => {
+    if (historyItems.length === 0) { toast.info('当前没有可清空的结果'); return; }
+    if (!window.confirm(`确认清空全部 ${historyItems.length} 条生成结果？（任务与参数保留）`)) return;
+    tasks.forEach(t => updateTask(t.id, { results: [] }));
+    toast.success(`已清空 ${historyItems.length} 条生成结果`);
+  };
+  const exportHistoryCsv = () => {
+    if (filteredHistory.length === 0) { toast.warning('没有可导出的结果'); return; }
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['任务号', '功能', '模型', '类型', '创建时间', 'URL'];
+    const rows = filteredHistory.map(i => [i.taskIndex, i.featureName, i.modelName, i.type === 'video' ? '视频' : '图片', new Date(i.createdAt).toLocaleString(), i.url]);
+    const csv = [header, ...rows].map(r => r.map(esc).join(',')).join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `生成历史_${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast.success(`已导出 ${filteredHistory.length} 条结果清单`);
+  };
 
   // ===== 列宽配置 =====
   interface ColumnWidth { key: string; label: string; defaultWidth: number; minWidth: number; width: number; flex?: boolean; }
@@ -1065,6 +1486,24 @@ export default function TaskTable() {
       toast.success(`已添加 ${toAdd.length} 张参考图`);
     }
   }, [tasks, updateTask]);
+
+  const handleAddReferenceVideo = useCallback((taskId: string, files: FileList | File[] | null) => {
+    if (!files || files.length === 0) return;
+    const file = Array.from(files)[0];
+    if (file.size > 100 * 1024 * 1024) {
+      toast.warning('参考视频过大，请上传 100MB 以内的视频');
+      return;
+    }
+    updateTask(taskId, { videoRefUrl: URL.createObjectURL(file), videoRefName: file.name });
+    toast.success(`已添加参考视频：${file.name}`);
+  }, [updateTask]);
+
+  const handleAddEndImage = useCallback((taskId: string, files: FileList | File[] | null) => {
+    if (!files || files.length === 0) return;
+    const file = Array.from(files)[0];
+    updateTask(taskId, { endImageUrl: URL.createObjectURL(file), endImageName: file.name });
+    toast.success(`已设置尾帧：${file.name}`);
+  }, [updateTask]);
 
   const handleDrop = useCallback(async (e: React.DragEvent, taskId: string) => {
     e.preventDefault();
@@ -1269,6 +1708,28 @@ export default function TaskTable() {
     }
   }, [markResultDownloaded]);
 
+  // 下载/转存视频结果（防 30 天过期丢失）
+  const handleDownloadVideo = useCallback(async (taskIndex: number, url: string, resultIndex: number) => {
+    const fileName = `FC-ai_video_#${taskIndex}_${resultIndex + 1}.mp4`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('bad status');
+      const blob = await res.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objUrl;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+      toast.success('视频已下载（建议立即转存，30 天后可能过期）');
+    } catch {
+      window.open(url, '_blank');
+      toast.info('已在浏览器打开，请右键「另存为视频」转存');
+    }
+  }, []);
+
   const handleSaveEditedImage = useCallback((taskId: string, imgIndex: number, blob: Blob, dataUrl: string) => {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
@@ -1309,6 +1770,14 @@ export default function TaskTable() {
     if (!task.prompt.trim()) {
       toast.warning('请先输入提示词');
       return;
+    }
+    // 视频模板素材前置校验（避免缺素材时走错生成分支）
+    if (task.featureId === 'video-motion' || task.featureId === 'video-replace') {
+      if (!task.videoRefUrl) { toast.warning('请先上传动作参考视频（动作跟随/全能替换必需）'); return; }
+      if (task.referenceImages.length === 0) { toast.warning('请先上传主体形象图 / 新元素图'); return; }
+    }
+    if (task.featureId === 'video-img2video' || task.featureId === 'video-live') {
+      if (task.referenceImages.length === 0) { toast.warning('请先上传参考图（本功能需图片作为素材）'); return; }
     }
 
     toast.info(`任务 #${task.index} 开始生成...`);
@@ -1387,7 +1856,24 @@ export default function TaskTable() {
           <Badge variant="outline" className="text-xs">{currentProject?.name}</Badge>
           <span className="text-xs text-muted-foreground">
             共 {filteredTasks.length} 个任务，已选 {selectedRows.size} 个
+            <span className="ml-2">· 已完成 {runStats.done} · 图片 {runStats.img} · 视频 {runStats.vid}</span>
           </span>
+          {(compareQueue.length > 0 || batchQueue.length > 0) && (
+            <span className="flex items-center gap-1.5">
+              {compareQueue.length > 0 && (
+                <Badge variant="outline" className="text-[10px] font-normal text-primary border-primary/40">
+                  <Loader2 className="size-3 animate-spin mr-1" />对比生成中 · 剩余 {compareQueue.length}
+                  <button onClick={() => setCompareCancel(true)} className="ml-1.5 text-destructive hover:underline">停止</button>
+                </Badge>
+              )}
+              {batchQueue.length > 0 && (
+                <Badge variant="outline" className="text-[10px] font-normal text-primary border-primary/40">
+                  <Loader2 className="size-3 animate-spin mr-1" />批量生成中 · 剩余 {batchQueue.length}
+                  <button onClick={() => setBatchCancel(true)} className="ml-1.5 text-destructive hover:underline">停止</button>
+                </Badge>
+              )}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <div className="relative w-64">
@@ -1405,6 +1891,10 @@ export default function TaskTable() {
           <Button variant="outline" size="sm" className="h-8 text-xs" onClick={resetColumnWidths}>
             <GripHorizontal className="size-3.5 mr-1" />
             恢复默认宽度
+          </Button>
+          <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setHistoryOpen(true)}>
+            <History className="size-3.5 mr-1" />
+            生成历史
           </Button>
           <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => addTask()}>
             <Plus className="size-3.5 mr-1" />
@@ -1514,6 +2004,124 @@ export default function TaskTable() {
                     tabIndex={0}
                   >
                     <div className="p-2.5 space-y-2.5">
+                      {/* 视频模板专属工作区：每个视频功能独立步骤引导 */}
+                      {isVideoModel(task.model) && task.featureId && (() => {
+                        const ft = getFeatureTemplate(task.featureId);
+                        const steps = ft?.steps || [];
+                        const vid = task.featureId;
+                        const noImg = vid === 'video-free' || vid === 'video-storyboard' || vid === 'video-library';
+                        const meta: Record<string, [string, string, string]> = {
+                          'video-free': ['🎬', '自由创作', '文生视频 · 无需参考图'],
+                          'video-img2video': ['🖼️', '图生视频', '上传商品图 → 动态化'],
+                          'video-storyboard': ['📋', '故事板视频', '文案驱动 · 多段分镜'],
+                          'video-motion': ['🏃', '动作跟随', '主体图 + 动作参考视频'],
+                          'video-replace': ['🔁', '全能替换', '原视频 + 新元素图'],
+                          'video-live': ['📱', '实况图', '单图转轻微动态'],
+                          'video-library': ['🗂️', '我的视频', '视频资产管理'],
+                        };
+                        const m = meta[vid];
+                        return (
+                          <div className="rounded-lg border border-primary/20 bg-primary/5 p-2.5 space-y-1.5">
+                            <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                              <span className="text-sm">{m?.[0]}</span>{m?.[1]}
+                              <span className="text-[9px] font-normal text-muted-foreground ml-auto">{m?.[2]}</span>
+                            </div>
+                            <ol className="text-[10px] text-muted-foreground list-decimal list-inside space-y-0.5">
+                              {steps.map((s, i) => <li key={i}>{s}</li>)}
+                            </ol>
+                            {noImg && (
+                              <div className="text-[10px] text-foreground/80 bg-background/60 rounded px-1.5 py-1">
+                                {vid === 'video-library'
+                                  ? '本功能用于管理历史视频，在下方结果区预览 / 下载 / 管理视频资产。'
+                                  : vid === 'video-storyboard'
+                                    ? '本功能为文生视频，无需参考图，请在下方分镜脚本逐段填写广告分镜。'
+                                    : '本功能为文生视频，无需参考图，直接在【提示词】列输入内容描述后点生成。'}
+                              </div>
+                            )}
+                            {vid === 'video-storyboard' && (() => {
+                              const sb = (task.storyboard && task.storyboard.length ? task.storyboard : [{ scene: '' }, { scene: '' }, { scene: '' }]);
+                              const setScene = (i: number, val: string) => {
+                                const next = [...sb]; next[i] = { scene: val };
+                                const filled = next.filter(x => x.scene.trim());
+                                const prompt = filled.length
+                                  ? '商品广告成片分镜：' + filled.map((x, k) => `${k + 1}.${x.scene.trim()}`).join('；') + '。运镜流畅，情绪递进，专业广告片质感，电商品牌广告级成片。'
+                                  : task.prompt;
+                                updateTask(task.id, { storyboard: next, prompt });
+                              };
+                              return (
+                                <div className="space-y-1.5">
+                                  <label className="text-[10px] text-muted-foreground flex items-center gap-1"><Clapperboard className="size-3" />分镜脚本（多段驱动长成片）</label>
+                                  {sb.map((seg, i) => (
+                                    <div key={i} className="flex items-center gap-1">
+                                      <span className="text-[10px] text-muted-foreground w-10 shrink-0">{i + 1}.</span>
+                                      <Input
+                                        value={seg.scene}
+                                        onChange={(e) => setScene(i, e.target.value)}
+                                        placeholder={`第 ${i + 1} 镜：如「开篇特写商品细节」`}
+                                        className="h-7 text-[11px]"
+                                      />
+                                    </div>
+                                  ))}
+                                  <div className="flex gap-1.5">
+                                    <Button size="sm" variant="outline" className="h-6 text-[10px] bg-background hover:bg-accent"
+                                      onClick={() => updateTask(task.id, { storyboard: [...sb, { scene: '' }] })}>
+                                      <Plus className="size-3 mr-1" />加镜头
+                                    </Button>
+                                    {sb.length > 1 && (
+                                      <Button size="sm" variant="outline" className="h-6 text-[10px] text-destructive hover:text-destructive bg-background"
+                                        onClick={() => updateTask(task.id, { storyboard: sb.slice(0, -1) })}>
+                                        <Trash2 className="size-3 mr-1" />删末镜
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                            {vid === 'video-img2video' && (
+                              <div className="space-y-1.5">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-muted-foreground flex items-center gap-1"><Film className="size-3" />首尾帧（可选结束画面）</span>
+                                  {!task.endImageUrl && (
+                                    <Button variant="outline" size="sm" className="h-6 text-[10px] bg-background hover:bg-accent"
+                                      onClick={() => document.getElementById(`endimage-${task.id}`)?.click()}>
+                                      <Upload className="size-3 mr-1" />上传尾帧
+                                    </Button>
+                                  )}
+                                </div>
+                                {task.endImageUrl ? (
+                                  <div className="flex items-center gap-2 rounded-md border border-border/50 bg-muted/20 px-2 py-1.5">
+                                    <Film className="size-3.5 text-primary shrink-0" />
+                                    <span className="text-[10px] text-foreground truncate flex-1">{task.endImageName || '尾帧.png'}</span>
+                                    <Button variant="ghost" size="sm" className="h-5 px-1.5 text-[10px] shrink-0"
+                                      onClick={() => updateTask(task.id, { endImageUrl: undefined, endImageName: undefined })}>
+                                      移除
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <div className="text-[10px] text-foreground/80 bg-background/60 rounded px-1.5 py-1">
+                                    仅上传首帧也能生成；设置尾帧可指定结束画面，实现可控运动。
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {vid === 'video-motion' && (
+                              <div className="text-[10px] text-foreground/80 bg-background/60 rounded px-1.5 py-1">
+                                上传主体形象图 + 动作参考视频，人物将完整复刻视频动作（可在参数列调保留原声 / 人物朝向 / 模式）。
+                              </div>
+                            )}
+                            {vid === 'video-replace' && (
+                              <div className="text-[10px] text-foreground/80 bg-background/60 rounded px-1.5 py-1">
+                                上传原视频 + 要替换的新元素图，AI 识别替换目标并融合光影运镜。
+                              </div>
+                            )}
+                            {vid === 'video-live' && (
+                              <div className="text-[10px] text-foreground/80 bg-background/60 rounded px-1.5 py-1">
+                                上传单张静态图，生成 3 秒轻微动态的实况图效果，适合社媒分享。
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       {/* 顶部：计数 + 按钮 */}
                       <div className="flex items-center justify-between gap-2">
                         <div className="text-sm font-medium text-foreground">
@@ -1524,6 +2132,7 @@ export default function TaskTable() {
                             /{MAX_REFERENCE_IMAGES} 张参考图
                           </span>
                         </div>
+                        {!(isVideoModel(task.model) && ['video-free', 'video-storyboard', 'video-library'].includes(task.featureId || '')) && (
                         <div className="flex gap-1.5">
                           <Button
                             variant="outline"
@@ -1544,6 +2153,7 @@ export default function TaskTable() {
                             添加文件夹
                           </Button>
                         </div>
+                        )}
                       </div>
 
                       
@@ -1614,6 +2224,7 @@ export default function TaskTable() {
                                         </div>
                                       )}
                                       {/* 拖放区域 */}
+                                      {!(isVideoModel(task.model) && ['video-free', 'video-storyboard', 'video-library'].includes(task.featureId || '')) && (
                                       <div
                                         className="border-2 border-dashed border-border/50 rounded-xl bg-muted/30 py-6 px-4 text-center cursor-pointer hover:border-primary/50 hover:bg-accent/30 transition-colors"
                                         onClick={() => document.getElementById(`ref-upload-${task.id}`)?.click()}
@@ -1625,6 +2236,7 @@ export default function TaskTable() {
                                           支持单张、批量图片，也可添加整个文件夹
                                         </div>
                                       </div>
+                                      )}
                                     </>
                                   );
                                 }
@@ -1703,10 +2315,64 @@ export default function TaskTable() {
                                 );
                               })()}
                             
+                              {/* 动作参考视频（动作跟随/全能替换） */}
+                              {(() => {
+                                const ft = task.featureId ? getFeatureTemplate(task.featureId) : undefined;
+                                if (!ft?.requiresVideo) return null;
+                                return (
+                                  <div className="pt-1.5 border-t border-border/40">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="text-xs font-medium text-foreground flex items-center gap-1">
+                                        <Film className="size-3.5 text-primary" />动作参考视频
+                                      </div>
+                                      {!task.videoRefUrl && (
+                                        <Button variant="outline" size="sm" className="h-7 text-xs bg-background hover:bg-accent"
+                                          onClick={() => document.getElementById(`ref-video-${task.id}`)?.click()}>
+                                          <Upload className="size-3.5 mr-1" />上传视频
+                                        </Button>
+                                      )}
+                                    </div>
+                                    {task.videoRefUrl ? (
+                                      <div className="mt-1.5 flex items-center gap-2 rounded-md border border-border/50 bg-muted/20 px-2 py-1.5">
+                                        <Film className="size-4 text-primary shrink-0" />
+                                        <span className="text-xs text-foreground truncate flex-1">{task.videoRefName || '参考视频.mp4'}</span>
+                                        <Button variant="ghost" size="sm" className="h-6 px-1.5 text-xs shrink-0"
+                                          onClick={() => updateTask(task.id, { videoRefUrl: undefined, videoRefName: undefined })}>
+                                          移除
+                                        </Button>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-1.5 rounded-md border border-dashed border-border/50 bg-muted/20 px-2 py-1.5 text-[10px] text-muted-foreground">
+                                        上传动作参考视频（MP4/MOV），人物的动作将复刻该视频
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                     </div>
                   </div>
 
                   {/* 隐藏的上传控件 */}
+                  <input
+                    id={`ref-video-${task.id}`}
+                    type="file"
+                    accept="video/*,.mp4,.mov,.webm"
+                    className="hidden"
+                    onChange={(e) => {
+                      handleAddReferenceVideo(task.id, e.target.files);
+                      e.currentTarget.value = '';
+                    }}
+                  />
+                  <input
+                    id={`endimage-${task.id}`}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      handleAddEndImage(task.id, e.target.files);
+                      e.currentTarget.value = '';
+                    }}
+                  />
                   <input
                     id={`ref-upload-${task.id}`}
                     type="file"
@@ -1753,7 +2419,12 @@ export default function TaskTable() {
 
                 {/* Prompt */}
                 <td className="px-3 py-3 align-top" style={{ width: colWidth('prompt') }}>
-                  {task.featureId === 'design-remove-bg' ? (
+                  {task.featureId === 'video-library' ? (
+                    <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center">
+                      <p className="text-[11px] text-muted-foreground">我的视频 · 资产查看</p>
+                      <p className="text-[10px] text-muted-foreground/70 mt-1">不参与生成，可在结果区预览 / 下载 / 管理历史视频</p>
+                    </div>
+                  ) : task.featureId === 'design-remove-bg' ? (
                     <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center">
                       <p className="text-[11px] text-muted-foreground">本地 RMBG 抠图</p>
                       <p className="text-[10px] text-muted-foreground/70 mt-1">无需提示词 · 主体原样保留</p>
@@ -1772,7 +2443,16 @@ export default function TaskTable() {
 
                 {/* Generation Params */}
                 <td className="px-3 py-3 align-top" style={{ width: colWidth('params') }}>
-                  {task.featureId === 'design-remove-bg' ? (
+                  {task.featureId === 'video-library' ? (
+                    <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center space-y-2">
+                      <p className="text-[11px] text-muted-foreground">视频资产管理</p>
+                      <p className="text-[10px] text-muted-foreground/70">本功能不参与生成，用于管理已生成的历史视频</p>
+                      <Button size="sm" variant="outline" className="h-6 text-[10px] w-full"
+                        onClick={() => setHistoryOpen(true)}>
+                        <History className="size-3 mr-1" />查看生成历史
+                      </Button>
+                    </div>
+                  ) : task.featureId === 'design-remove-bg' ? (
                     <div className="rounded-md border border-dashed border-border bg-muted/30 p-3 text-center">
                       <p className="text-[11px] text-muted-foreground">本地 RMBG 抠图</p>
                       <p className="text-[10px] text-muted-foreground/70 mt-1">无需模型 / 分辨率 / 质量参数</p>
@@ -1795,6 +2475,29 @@ export default function TaskTable() {
                     </div>
                   ) : (
                     <div className="space-y-2">
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <label className="text-[10px] text-muted-foreground">我的模板</label>
+                          <Button variant="ghost" size="sm" className="h-5 px-1 text-[10px] text-primary"
+                            onClick={() => saveCurrentAsTemplate(task)}>
+                            <Save className="size-3 mr-0.5" />保存当前
+                          </Button>
+                        </div>
+                        {myTemplates.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {myTemplates.map(t => (
+                              <button key={t.id} title={`应用「${t.name}」到本任务`} onClick={() => applyTemplate(task, t)}
+                                className="group flex items-center gap-0.5 h-6 px-1.5 rounded border border-border/60 bg-muted/20 text-[10px] text-foreground hover:border-primary/50 hover:bg-primary/5 transition-colors max-w-full">
+                                <span className="truncate max-w-[90px]">{t.name}</span>
+                                <X className="size-3 text-muted-foreground group-hover:text-destructive shrink-0"
+                                  onClick={(e) => { e.stopPropagation(); removeTemplate(t.id); }} />
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-muted-foreground">保存常用参数，下次一键套用</p>
+                        )}
+                      </div>
                       <div className="space-y-1">
                         <label className="text-[10px] text-muted-foreground">模型</label>
                         <Select
@@ -1875,6 +2578,23 @@ export default function TaskTable() {
                         </Select>
                       </div>
                       <div className="space-y-1">
+                        <label className="text-[10px] text-muted-foreground">多模型对比（同提示词各出一张）</label>
+                        <div className="flex flex-wrap gap-1 max-h-[92px] overflow-y-auto">
+                          {activeModels.filter(m => !isVideoModel(m.id)).map(m => {
+                            const on = comparePick.includes(m.id);
+                            return (
+                              <button key={m.id} onClick={() => setComparePick(prev => on ? prev.filter(x => x !== m.id) : [...prev, m.id])}
+                                className={`h-6 px-1.5 rounded text-[10px] border transition-colors ${on ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+                                {m.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <Button variant="outline" size="sm" className="w-full h-7 text-xs" onClick={() => startCompareGenerate(task, comparePick)}>
+                          <Sparkles className="size-3 mr-1" />对比生成
+                        </Button>
+                      </div>
+                      <div className="space-y-1">
                         <label className="text-[10px] text-muted-foreground">比例与分辨率</label>
                         <Select
                           value={task.ratio}
@@ -1900,7 +2620,7 @@ export default function TaskTable() {
                       {(task.model.includes('gpt-image-2.5') || task.model.includes('gpt_image_2.5')) ? (
                         <div className="grid grid-cols-2 gap-1.5">
                           <div className="space-y-1">
-                            <label className="text-[10px] text-muted-foreground">图片质量</label>
+                            <label className="text-[10px] text-muted-foreground">{isVideoModel(task.model) ? '视频质量' : '图片质量'}</label>
                             <Select
                               value={task.quality}
                               onValueChange={(v) => updateTask(task.id, { quality: v })}
@@ -1934,7 +2654,7 @@ export default function TaskTable() {
                         </div>
                       ) : (
                         <div className="space-y-1">
-                          <label className="text-[10px] text-muted-foreground">图片质量</label>
+                          <label className="text-[10px] text-muted-foreground">{isVideoModel(task.model) ? '视频质量' : '图片质量'}</label>
                           <Select
                             value={task.quality}
                             onValueChange={(v) => updateTask(task.id, { quality: v })}
@@ -1950,6 +2670,93 @@ export default function TaskTable() {
                           </Select>
                         </div>
                       )}
+                      {isVideoModel(task.model) ? (
+                        <div className="space-y-1">
+                          <label className="text-[10px] text-muted-foreground">视频时长（秒）</label>
+                          <div className="flex gap-1 flex-wrap">
+                            {getVideoDurationLimit(task.model).presets.map((n) => (
+                              <Button
+                                key={n}
+                                variant={(task.duration || 5) === n ? 'default' : 'outline'}
+                                size="sm"
+                                className="h-7 flex-1 text-xs min-w-[28px]"
+                                onClick={() => updateTask(task.id, { duration: n })}
+                              >
+                                {n}s
+                              </Button>
+                            ))}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs px-2"
+                              onClick={() => {
+                                const el = document.getElementById(`custom-duration-${task.id}`);
+                                el?.focus();
+                              }}
+                            >
+                              自定义
+                            </Button>
+                          </div>
+                          <input
+                            id={`custom-duration-${task.id}`}
+                            type="text"
+                            inputMode="numeric"
+                            value={String(task.duration || '')}
+                            onChange={(e) => {
+                              const val = e.target.value.replace(/[^0-9]/g, '');
+                              updateTask(task.id, { duration: val === '' ? 0 : parseInt(val) });
+                            }}
+                            onBlur={(e) => {
+                              const v = parseInt(e.target.value);
+                              if (isNaN(v) || v < 1) { updateTask(task.id, { duration: 5 }); toast.warning('视频时长不能小于 1 秒'); }
+                              else if (v > getVideoDurationLimit(task.model).max) { updateTask(task.id, { duration: getVideoDurationLimit(task.model).max }); toast.warning(`视频时长上限 ${getVideoDurationLimit(task.model).max} 秒`); }
+                            }}
+                            placeholder={`1-${getVideoDurationLimit(task.model).max}`}
+                            className="h-7 w-full text-xs px-2 rounded-md border border-input bg-transparent focus:border-ring focus:ring-1 focus:ring-ring/20 outline-none"
+                          />
+                          {/* 动作跟随专属：动作参数 */}
+                          {task.featureId === 'video-motion' && (
+                            <div className="space-y-1.5 pt-1 border-t border-border/40">
+                              <label className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                <Settings className="size-3" />动作参数
+                              </label>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] text-muted-foreground">保留原声</span>
+                                <button
+                                  onClick={() => updateTask(task.id, { videoKeepSound: !task.videoKeepSound })}
+                                  className={`h-5 w-9 rounded-full transition-colors ${task.videoKeepSound ? 'bg-primary' : 'bg-muted'}`}
+                                  title={task.videoKeepSound ? '保留原视频声音' : '不保留声音（默认）'}
+                                >
+                                  <span className={`block size-4 rounded-full bg-white shadow transition-transform ${task.videoKeepSound ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                                </button>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-muted-foreground">人物朝向</label>
+                                <Select value={task.videoOrientation || 'image'} onValueChange={(v) => updateTask(task.id, { videoOrientation: v === 'image' ? undefined : (v as 'front' | 'back' | 'left' | 'right') })}>
+                                  <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="image" className="text-xs">跟随形象图</SelectItem>
+                                    <SelectItem value="front" className="text-xs">正面</SelectItem>
+                                    <SelectItem value="back" className="text-xs">背面</SelectItem>
+                                    <SelectItem value="left" className="text-xs">左侧</SelectItem>
+                                    <SelectItem value="right" className="text-xs">右侧</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-muted-foreground">控制模式</label>
+                                <Select value={task.videoMode || 'standard'} onValueChange={(v) => updateTask(task.id, { videoMode: v === 'standard' ? undefined : v })}>
+                                  <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="standard" className="text-xs">标准 Standard</SelectItem>
+                                    <SelectItem value="pro" className="text-xs">专业 Pro</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
                       <div className="space-y-1">
                         <label className="text-[10px] text-muted-foreground">张数</label>
                         <div className="flex gap-1 flex-wrap">
@@ -1997,6 +2804,27 @@ export default function TaskTable() {
                           className="h-7 w-full text-xs px-2 rounded-md border border-input bg-transparent focus:border-ring focus:ring-1 focus:ring-ring/20 outline-none"
                         />
                       </div>
+                      )}
+                      {!isVideoModel(task.model) && (
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-muted-foreground">批量生成（背景/提示词变体 × 自动排队）</label>
+                        <input
+                          value={batchBg}
+                          onChange={(e) => setBatchBg(e.target.value)}
+                          placeholder="背景变体，逗号分隔，如：白色棚拍, 沙滩, 城市街拍"
+                          className="h-7 w-full text-xs px-2 rounded-md border border-input bg-transparent focus:border-ring focus:ring-1 focus:ring-ring/20 outline-none"
+                        />
+                        <input
+                          value={batchSuffix}
+                          onChange={(e) => setBatchSuffix(e.target.value)}
+                          placeholder="提示词变体，逗号分隔，如：侧面展示, 背面展示"
+                          className="h-7 w-full text-xs px-2 rounded-md border border-input bg-transparent focus:border-ring focus:ring-1 focus:ring-ring/20 outline-none"
+                        />
+                        <Button variant="outline" size="sm" className="w-full h-7 text-xs" onClick={() => startBatchGenerate(task)}>
+                          <Layers className="size-3 mr-1" />批量生成
+                        </Button>
+                      </div>
+                      )}
                     </div>
                   )}
                   </>
@@ -2005,19 +2833,26 @@ export default function TaskTable() {
 
                 {/* Actions */}
                 <td className="px-3 py-3 align-top" style={{ width: colWidth('action') }}>
+                  {task.featureId === 'video-library' ? (
+                    <Button variant="outline" size="sm" className="h-8 text-xs w-full" onClick={() => setHistoryOpen(true)}>
+                      <History className="size-3.5 mr-1" />管理视频
+                    </Button>
+                  ) : (
                   <div className="flex flex-col gap-1.5">
                     <Button
                       size="sm"
-                      className="h-8 text-xs"
+                      className={`h-8 text-xs ${task.status === 'failed' ? 'bg-primary hover:bg-primary/90' : ''}`}
                       onClick={() => handleGenerate(task.id)}
                       disabled={task.status === 'generating'}
                     >
                       {task.status === 'generating' ? (
                         <RefreshCw className="size-3.5 mr-1 animate-spin" />
+                      ) : task.status === 'failed' ? (
+                        <RotateCcw className="size-3.5 mr-1" />
                       ) : (
                         <Play className="size-3.5 mr-1 fill-current" />
                       )}
-                      立即生成
+                      {task.status === 'failed' ? '重试' : '立即生成'}
                     </Button>
                     {task.featureId !== 'design-remove-bg' && (
                       <Button
@@ -2032,18 +2867,19 @@ export default function TaskTable() {
                       </Button>
                     )}
                   </div>
+                  )}
                 </td>
 
                 {/* Results - 弹性列，占满剩余空间 */}
                 <td className="px-3 py-3 align-top" style={resultsFlexCol ? { minWidth: Math.max(300, colWidth('results') || 300), width: 'auto' } : { width: colWidth('results') }}>
-                  {task.results.length === 0 && task.status !== 'generating' ? (
+                  {(task.featureId === 'video-library' ? tasks.flatMap(t => t.results.filter(r => r.type === 'video')) : task.results).length === 0 && task.status !== 'generating' ? (
                     <div className="flex flex-col items-center justify-center py-8 text-xs text-muted-foreground bg-muted/20 rounded-md border border-dashed border-border/60">
-                      暂无生成结果
+                      {task.featureId === 'video-library' ? '暂无视频资产（生成视频后会自动汇总到此处）' : '暂无生成结果'}
                     </div>
                   ) : (
                     <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))' }}>
                       {/* 已生成的图片 */}
-                      {task.results.map((img, imgIdx) => {
+                      {(task.featureId === 'video-library' ? tasks.flatMap(t => t.results.filter(r => r.type === 'video')) : task.results).map((img, imgIdx) => {
                         const hasDownloadedJpg = !!img.downloadedJpg;
                         const hasDownloadedPng = !!img.downloadedPng;
                         const anyDownloaded = hasDownloadedJpg || hasDownloadedPng;
@@ -2058,7 +2894,17 @@ export default function TaskTable() {
                               </div>
                               <div className="px-1.5 py-1 text-[10px] text-muted-foreground flex justify-between items-center">
                                 <span className="font-medium text-foreground/80">视频 {imgIdx + 1}</span>
-                                {img.duration ? <span>{img.duration}s</span> : null}
+                                <span className="flex items-center gap-1">
+                                  {img.duration ? <span>{img.duration}s</span> : null}
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleDownloadVideo(task.index, img.url, imgIdx); }}
+                                    className="h-5 px-1.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors flex items-center gap-0.5 font-medium"
+                                    title="下载/转存视频（防过期丢失）"
+                                  >
+                                    <Download className="size-3" />
+                                    转存
+                                  </button>
+                                </span>
                               </div>
                             </div>
                           );
@@ -2172,11 +3018,27 @@ export default function TaskTable() {
                                     <Download className="size-3" />
                                     <span className="hidden md:inline">PNG</span>
                                   </button>
+                                  {task.referenceImages.length > 0 && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setCompare({ before: task.referenceImages[0].url, after: img.url, taskIndex: task.index, resultIdx: imgIdx });
+                                      }}
+                                      className="flex-1 h-6 text-[10px] flex items-center justify-center gap-0.5 rounded-md border bg-white/90 border-white/50 text-foreground hover:bg-white transition-colors"
+                                      title="原图 vs 效果图对比"
+                                    >
+                                      <span className="hidden md:inline">对比原图</span>
+                                      <span className="md:hidden">对比</span>
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             </div>
                             {/* 操作按钮区 */}
                             <div className="p-1.5 space-y-1 pointer-events-auto">
+                              <div className="px-0.5 text-[9px] text-muted-foreground truncate" title={img.model}>
+                                {img.model ? (activeModels.find(m => m.id === img.model)?.name || img.model) : ''}
+                              </div>
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -2317,6 +3179,129 @@ export default function TaskTable() {
             : undefined
         }
          />
+
+       {/* 原图 vs 效果图对比 */}
+       <Dialog open={!!compare} onOpenChange={(open) => !open && setCompare(null)}>
+         <DialogContent className="max-w-xl max-h-[85vh] overflow-hidden flex flex-col">
+           <DialogHeader>
+             <DialogTitle className="flex items-center gap-2 text-sm">
+               <ChevronsLeftRight className="size-4" />原图 vs 效果图对比{compare ? `（任务#${compare.taskIndex}-结果${compare.resultIdx + 1}）` : ''}
+             </DialogTitle>
+           </DialogHeader>
+           {compare && (
+             <div
+               ref={compareRef}
+               className="relative w-full aspect-[3/4] overflow-hidden select-none bg-black/95 touch-none cursor-ew-resize"
+               onPointerDown={updateComparePos}
+               onPointerMove={(e) => { if (e.buttons === 1) updateComparePos(e); }}
+             >
+               <img src={compare.after} alt="效果图" className="absolute inset-0 w-full h-full object-contain" draggable={false} />
+               <div className="absolute inset-0" style={{ clipPath: `inset(0 ${100 - comparePos}% 0 0)` }}>
+                 <img src={compare.before} alt="原图" className="absolute inset-0 w-full h-full object-contain" draggable={false} />
+               </div>
+               {/* 分隔线 */}
+               <div className="absolute top-0 bottom-0 w-0.5 bg-white/85 shadow-md" style={{ left: `${comparePos}%` }}>
+                 <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 size-7 rounded-full bg-white text-foreground flex items-center justify-center shadow-lg pointer-events-none">
+                   <ChevronsLeftRight className="size-4" />
+                 </div>
+               </div>
+               <span className="absolute top-2 left-2 text-[10px] px-1.5 py-0.5 rounded bg-black/60 text-white">原图</span>
+               <span className="absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded bg-black/60 text-white">效果</span>
+             </div>
+           )}
+         </DialogContent>
+       </Dialog>
+
+       {/* 生成历史（跨任务汇总） */}
+       <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+         <DialogContent className="max-w-4xl max-h-[85vh] overflow-hidden flex flex-col">
+           <DialogHeader>
+             <DialogTitle className="flex items-center gap-2 text-sm">
+               <History className="size-4" />生成历史
+               <span className="text-[10px] font-normal text-muted-foreground">共 {historyItems.length} 条，跨全部任务汇总</span>
+             </DialogTitle>
+           </DialogHeader>
+           <div className="flex items-center gap-2 flex-wrap">
+             <div className="relative flex-1 min-w-[180px]">
+               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+               <Input
+                 placeholder="搜索模型 / 功能 / 任务号..."
+                 className="h-8 pl-8 text-xs"
+                 value={historySearch}
+                 onChange={(e) => setHistorySearch(e.target.value)}
+               />
+             </div>
+             <div className="flex gap-1 flex-wrap max-h-9 overflow-y-auto">
+               {historyCats.map(c => (
+                 <button key={c} onClick={() => setHistoryCat(c)}
+                   className={`h-7 px-2 rounded text-[10px] border transition-colors ${historyCat === c ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+                   {c === 'all' ? '全部' : c === 'video' ? '视频' : c}
+                 </button>
+               ))}
+             </div>
+             <div className="flex gap-1 flex-wrap max-h-9 overflow-y-auto">
+               <button onClick={() => setHistoryProject('all')}
+                 className={`h-7 px-2 rounded text-[10px] border transition-colors ${historyProject === 'all' ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+                 全部项目
+               </button>
+               {projects.map(p => (
+                 <button key={p.id} onClick={() => setHistoryProject(p.id)}
+                   className={`h-7 px-2 rounded text-[10px] border transition-colors ${historyProject === p.id ? 'bg-primary/10 border-primary/50 text-primary' : 'border-border/60 bg-muted/20 text-foreground hover:border-primary/30'}`}>
+                   {p.name}
+                 </button>
+               ))}
+             </div>
+             <Button variant="outline" size="sm" className="h-7 text-xs" onClick={exportHistoryCsv}>
+               <Download className="size-3 mr-1" />导出
+             </Button>
+             <Button variant="outline" size="sm" className="h-7 text-xs text-destructive hover:text-destructive" onClick={clearAllResults}>
+               <Trash2 className="size-3 mr-1" />清空
+             </Button>
+           </div>
+           <div className="flex-1 overflow-y-auto pr-1">
+             {filteredHistory.length === 0 ? (
+               <div className="flex flex-col items-center justify-center py-10 text-xs text-muted-foreground bg-muted/20 rounded-md border border-dashed border-border/60">
+                 暂无匹配的生成结果
+               </div>
+             ) : (
+               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2">
+                 {filteredHistory.map((item) => (
+                   <div key={item.resultId} className="group relative rounded-md border border-border/50 bg-card overflow-hidden">
+                     <div className="relative aspect-[3/4] bg-muted/30">
+                       {item.type === 'video' ? (
+                         <video src={item.url} preload="metadata" className="w-full h-full object-cover" />
+                       ) : (
+                         <Image src={item.url} alt={`历史 ${item.taskIndex}`} loading="lazy" decoding="async"
+                           className="w-full h-full object-cover" onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '0.3'; }} />
+                       )}
+                       {/* hover 操作 */}
+                       <div className="absolute inset-x-0 bottom-0 flex gap-1 p-1 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                         <button
+                           onClick={() => item.type === 'video'
+                             ? handleDownloadVideo(item.taskIndex, item.url, item.resultIndex)
+                             : handleDownloadResult(item.taskId, item.resultId, item.url, 'jpg', item.taskIndex, item.resultIndex)}
+                           className="flex-1 h-6 text-[10px] rounded bg-white/90 text-foreground hover:bg-white flex items-center justify-center gap-0.5">
+                           <Download className="size-3" />下载
+                         </button>
+                         {item.type !== 'video' && (
+                           <button
+                             onClick={() => handleUseResultAsReference(item.taskId, item.url, item.resultId)}
+                             className="flex-1 h-6 text-[10px] rounded bg-white/90 text-foreground hover:bg-white flex items-center justify-center gap-0.5">
+                             <ImagePlus className="size-3" />参考
+                           </button>
+                         )}
+                       </div>
+                     </div>
+                     <div className="px-1.5 py-1 text-[9px] text-muted-foreground truncate" title={`${item.modelName} · ${item.featureName}`}>
+                       #{item.taskIndex} · {item.featureName}
+                     </div>
+                   </div>
+                 ))}
+               </div>
+             )}
+           </div>
+         </DialogContent>
+       </Dialog>
 
        {/* 蒙版编辑器 */}
        <MaskEditor

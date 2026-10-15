@@ -70,6 +70,20 @@ export interface ITask {
   duration?: number;
   /** 视频动作参考（URL），动作跟随/全能替换功能特有 */
   videoRefUrl?: string;
+  /** 视频动作参考文件名（显示用） */
+  videoRefName?: string;
+  /** 图生视频首尾帧（end_image，可灵）：可选指定结束画面 URL */
+  endImageUrl?: string;
+  /** 图生视频首尾帧文件名（显示用） */
+  endImageName?: string;
+  /** 动作跟随：保留原声 */
+  videoKeepSound?: boolean;
+  /** 动作跟随：人物朝向 front/back/left/right（可灵 motion-control character_orientation） */
+  videoOrientation?: 'front' | 'back' | 'left' | 'right';
+  /** 动作跟随：控制模式（可灵 motion-control mode） */
+  videoMode?: string;
+  /** 故事板分镜段落（每段场景描述，驱动长成片） */
+  storyboard?: { scene: string }[];
   errorMsg?: string;
   createdAt: number;
   startedAt?: number;
