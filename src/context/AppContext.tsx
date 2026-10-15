@@ -283,13 +283,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const [activeModels, setActiveModelsState] = useState<IModel[]>(() => {
     const cached = safeParse<IModel[]>(scopedStorage.getItem(KEY_ACTIVE_MODELS), []);
-    // 内置模型默认激活（不再默认隐藏）：图片内置(MOCK_MODELS)与视频内置(VIDEO_MODELS)随版本更新即时生效，无需手动勾选；
-    // 缓存中用户自定义(API)模型一并保留。
-    const builtins = ([] as IModel[]).concat(MOCK_MODELS, VIDEO_MODELS).filter(m => m.isActive !== false);
+    // 取消内置模型自动勾选：仅保留用户通过 API 配置加载/自定义(isCustom)的模型自动激活；
+    // 内置模型(MOCK_MODELS/VIDEO_MODELS)不再默认勾选，需要使用时在模型下拉中手动勾选。
     const map = new Map<string, IModel>();
-    builtins.forEach(m => { if (m && m.id) map.set(m.id, m); });
     if (cached && Array.isArray(cached)) {
-      cached.forEach(m => { if (m && m.id && !map.has(m.id)) map.set(m.id, m); });
+      cached.forEach(m => { if (m && m.id && m.isCustom && !map.has(m.id)) map.set(m.id, m); });
     }
     return [...map.values()];
   });
@@ -577,7 +575,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!tpl) return null;
     const isVideo = isVideoModel(tpl.recommendedModel);
     // 视频模型自动激活（加入 activeModels，使模型下拉可显示/切换）
-    if (isVideo) {
+    if (isVideo && hasUsableApi(tpl.recommendedModel)) {
       setActiveModelsState(prev =>
         prev.some(m => m.id === tpl.recommendedModel)
           ? prev
