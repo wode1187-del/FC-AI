@@ -109,6 +109,8 @@ export interface ITask {
   maskEnabled?: boolean;
   /** 自由改款专属：用户自定义补充提示词（与改款/排版自动提示词分开存储，提交时合成到 prompt） */
   customPrompt?: string;
+  /** 云端精准换色：发往云端分割模型的识别指令（可含 {point} 占位，留空用默认） */
+  cloudPrompt?: string;
 }
 
 // API 配置

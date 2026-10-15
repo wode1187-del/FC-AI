@@ -59,6 +59,7 @@ import {
    Clapperboard,
    RotateCcw,
    Wand2,
+   CloudLightning,
  } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -86,6 +87,7 @@ import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
 import MaskEditor from '@/components/MaskEditor';
 import { runRecolorLocal } from '@/lib/recolor';
+import { runCloudRecolor, getCloudRecolorConfig } from '@/lib/cloudRecolor';
 import { useApp } from '@/context/AppContext';
 import { isVideoModel, getFeatureTemplate, getVideoDurationLimit } from '@/data/featureTemplates';
 import { VIDEO_PROMPT_PRESETS, IMAGE_PROMPT_PRESETS } from '@/data/promptPresets';
@@ -155,6 +157,43 @@ const TaskPromptCell = memo(function TaskPromptCell({
         }] });
         toast.success('本地精确换色完成（纹理保留，未调用 API）');
       } catch (e) { toast.error('本地精确换色失败：' + String(e)); }
+    };
+    img.onerror = () => toast.error('参考图加载失败');
+    img.src = ref.url;
+  }
+  // 云端精准换色：云端大模型出衣服蒙版 + 保留明度色相旋转（独立功能，与本地换色完全分离）
+  function cloudRecolorHere() {
+    const hex = (task.prompt.match(/【选色】服装颜色改为(?:[^（】]*（)?(#[0-9A-Fa-f]{6})/))?.[1] || '#9B5DE5';
+    const ref = task.referenceImages?.[0];
+    if (!ref?.url) { toast.warning('请先上传参考图（本功能需原图作为素材）'); return; }
+    const cfg = getCloudRecolorConfig();
+    if (!cfg || !cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+      toast.error('未配置云端换色 API，请到「接口配置 → 云端换色」填写 Base URL / API Key / Model 后重试');
+      return;
+    }
+    toast.info('正在云端精准换色（云端分割衣服蒙版 + 保留明度）…');
+    const img = new window.Image();
+    img.onload = async () => {
+      try {
+        const max = 2048;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const out = await runCloudRecolor(id, hex, cfg, task.cloudPrompt);
+        canvas.width = out.width; canvas.height = out.height;
+        ctx.putImageData(out, 0, 0);
+        const url = canvas.toDataURL('image/jpeg', 0.92);
+        const now = Date.now();
+        updateTask(task.id, { results: [...(task.results || []), {
+          id: `cloud-recolor-${now}`, url, model: cfg.model || 'cloud', prompt: `云端精准换色 → ${hex}`,
+          createdAt: now, width: out.width, height: out.height, type: 'image',
+        }] });
+        toast.success('云端精准换色完成（云端蒙版 · 保留纹理）');
+      } catch (e) { toast.error('云端精准换色失败：' + String(e)); }
     };
     img.onerror = () => toast.error('参考图加载失败');
     img.src = ref.url;
@@ -897,6 +936,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
           <div className="flex gap-1.5 items-center">
             <input
               type="color"
+              value={(localPrompt.match(/#[0-9A-Fa-f]{6}/))?.[0] ?? '#000000'}
               onChange={(e) => {
                 const hex = e.target.value;
                 const colorMark = `【选色】服装颜色改为${hex}`;
@@ -906,7 +946,8 @@ const TaskPromptCell = memo(function TaskPromptCell({
                 updateTask(task.id, { prompt: newPrompt });
                 setLocalPrompt(newPrompt);
               }}
-              className="w-8 h-8 rounded border border-border cursor-pointer"
+              title="自定义拾取颜色"
+              className="w-8 h-8 rounded border border-border cursor-pointer shrink-0"
             />
             <input
               type="text"
@@ -928,35 +969,59 @@ const TaskPromptCell = memo(function TaskPromptCell({
             <Button size="sm" variant="outline" className="h-6 text-[10px] bg-background hover:bg-accent" onClick={localRecolorHere} title="本地分割衣服蒙版+保留明度只改色相，不调用API、不重绘纹理">
               <Wand2 className="size-3 mr-1" />本地精确换色<span className="text-[8px] text-muted-foreground ml-0.5">（保留纹理·不调API）</span>
             </Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px] bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/30 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/20" onClick={cloudRecolorHere} title="云端大模型出衣服蒙版+保留明度只改色相，需先在接口配置-云端换色填好 API">
+              <CloudLightning className="size-3 mr-1" />云端精准换色<span className="text-[8px] opacity-70 ml-0.5">（云端蒙版）</span>
+            </Button>
             {[
-              { name: '黑色', color: '#000000' },
-              { name: '白色', color: '#FFFFFF' },
-              { name: '大红色', color: '#E63946' },
-              { name: '粉色', color: '#F4A7C0' },
-              { name: '橙色', color: '#F4A261' },
-              { name: '鹅黄色', color: '#F1E15B' },
-              { name: '军绿色', color: '#556B2F' },
-              { name: '湖蓝色', color: '#457B9D' },
-              { name: '深蓝色', color: '#1D3557' },
-              { name: '紫色', color: '#9B5DE5' },
-              { name: '灰色', color: '#8D99AE' },
-              { name: '卡其色', color: '#C9B896' },
-            ].map((c) => (
-              <button
-                key={c.name}
-                onClick={() => {
-                  const colorMark = `【选色】服装颜色改为${c.name}（${c.color}）`;
-                  const newPrompt = localPrompt.includes('【选色】')
-                    ? localPrompt.replace(/【选色】服装颜色改为[^，。\n]*/, colorMark)
-                    : localPrompt + ' ' + colorMark;
-                  updateTask(task.id, { prompt: newPrompt });
-                  setLocalPrompt(newPrompt);
-                }}
-                title={`${c.name} ${c.color}`}
-                className="w-6 h-6 rounded border border-border hover:scale-110 transition-transform"
-                style={{ backgroundColor: c.color }}
-              />
+              { group: '基础色', colors: [
+                { name: '黑色', color: '#000000' },
+                { name: '白色', color: '#FFFFFF' },
+                { name: '灰色', color: '#8D99AE' },
+                { name: '卡其色', color: '#C9B896' },
+              ] },
+              { group: '彩色', colors: [
+                { name: '大红色', color: '#E63946' },
+                { name: '粉色', color: '#F4A7C0' },
+                { name: '橙色', color: '#F4A261' },
+                { name: '鹅黄色', color: '#F1E15B' },
+                { name: '军绿色', color: '#556B2F' },
+                { name: '湖蓝色', color: '#457B9D' },
+                { name: '深蓝色', color: '#1D3557' },
+                { name: '紫色', color: '#9B5DE5' },
+              ] },
+            ].map((g) => (
+              <div key={g.group} className="flex flex-wrap items-center gap-1.5 w-full">
+                <span className="text-[10px] text-muted-foreground w-9 shrink-0">{g.group}</span>
+                {g.colors.map((c) => (
+                  <button
+                    key={c.name}
+                    onClick={() => {
+                      const colorMark = `【选色】服装颜色改为${c.name}（${c.color}）`;
+                      const newPrompt = localPrompt.includes('【选色】')
+                        ? localPrompt.replace(/【选色】服装颜色改为[^，。\n]*/, colorMark)
+                        : localPrompt + ' ' + colorMark;
+                      updateTask(task.id, { prompt: newPrompt });
+                      setLocalPrompt(newPrompt);
+                    }}
+                    title={`${c.name} ${c.color}`}
+                    className="w-6 h-6 rounded border border-border hover:scale-110 transition-transform"
+                    style={{ backgroundColor: c.color }}
+                  />
+                ))}
+              </div>
             ))}
+          </div>
+          <div className="space-y-1 pt-1.5 border-t border-border/40">
+            <span className="text-[10px] text-muted-foreground">
+              云端识别指令（可选，可含 <code className="font-mono">{"{point}"}</code> = 点选坐标；留空用默认：分割衣物 / 排除脸手皮肤头发背景）
+            </span>
+            <input
+              type="text"
+              value={task.cloudPrompt ?? ''}
+              onChange={(e) => updateTask(task.id, { cloudPrompt: e.target.value })}
+              placeholder="例：只分割人物上衣/连衣裙，排除腰带、配饰与手臂"
+              className="w-full h-7 text-[11px] border border-border rounded px-2"
+            />
           </div>
         </div>
       )}

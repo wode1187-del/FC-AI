@@ -1,8 +1,9 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Search, Plus, Check, Copy, Eye, EyeOff, RefreshCw, X, AlertTriangle, Sparkles } from 'lucide-react';
+import { Search, Plus, Check, Copy, Eye, EyeOff, RefreshCw, X, AlertTriangle, Sparkles, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApp } from '@/context/AppContext';
+import { getCloudRecolorConfigs, saveCloudRecolorConfigs, addCloudRecolorConfig, removeCloudRecolorConfig, setActiveCloudRecolorConfig, type CloudRecolorConfig } from '@/lib/cloudRecolor';
 import type { IApiConfig } from '@/data/models';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,6 +28,7 @@ const API_TABS = [
   { id: 'volcengine', label: '火山引擎 / 即梦', sub: '即梦 5.0' },
   { id: 'custom', label: '自定义兼容接口', sub: 'OpenAI Compatible' },
   { id: 'video', label: '自定义视频接口', sub: '可灵 + 即梦' },
+  { id: 'cloudrecolor', label: '云端换色', sub: 'SAM2.1 分割' },
   { id: 'prompt', label: '提示词优化 API', sub: '独立文本模型' },
 ];
 
@@ -68,6 +70,13 @@ export default function ApiPage() {
 
   const [activeTab, setActiveTab] = useState('openai');
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // 云端换色独立配置（多条 API，存 localStorage，不混入生成 API）
+  const [cloudList, setCloudList] = useState<CloudRecolorConfig[]>(() => getCloudRecolorConfigs());
+  const [cloudKeyVisible, setCloudKeyVisible] = useState<Record<string, boolean>>({});
+  const patchCloud = (id: string, p: Partial<CloudRecolorConfig>) => {
+    setCloudList((prev) => { const n = prev.map((c) => (c.id === id ? { ...c, ...p } : c)); saveCloudRecolorConfigs(n); return n; });
+  };
 
   // URL 参数控制激活 Tab（支持从生成台跳转直达）
   useEffect(() => {
@@ -222,7 +231,7 @@ export default function ApiPage() {
           </CardHeader>
           <CardContent>
               <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-              <TabsList className="grid grid-cols-6 mb-6 w-full">
+              <TabsList className="grid grid-cols-7 mb-6 w-full">
                 {API_TABS.map((tab) => (
                   <TabsTrigger key={tab.id} value={tab.id} className="flex flex-col gap-0.5 py-2">
                     <span className="text-xs font-medium">{tab.label}</span>
@@ -232,6 +241,104 @@ export default function ApiPage() {
               </TabsList>
 
               {API_TABS.map((tab) => {
+                if (tab.id === 'cloudrecolor') {
+                  return (
+                    <TabsContent key={tab.id} value={tab.id} className="space-y-6 mt-0">
+                      <div className="space-y-4 p-4 rounded-lg bg-muted/30 border border-border/40">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium">云端换色（精准衣服蒙版）</span>
+                            <Badge variant="outline" className="text-[10px] py-0 h-5">独立功能 · 与本地换色分离</Badge>
+                          </div>
+                          <Button size="sm" variant="outline" onClick={() => { const c = addCloudRecolorConfig(); setCloudList(getCloudRecolorConfigs()); }}>
+                            <Plus className="size-3.5 mr-1" />新增云端 API
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          供「服装改色 → 云端精准换色」使用：云端大模型（推荐火山方舟 SAM2.1 视觉提示分割）生成像素级衣服蒙版，
+                          本地对蒙版内做「保留明度·只改色相」换色，不重绘纹理。端点使用 OpenAI 兼容接口，密钥仅存本机。
+                          可配置多条云端 API，标注「当前使用」的为默认（换色按钮采用）。
+                        </p>
+                        {cloudList.length === 0 && (
+                          <div className="text-sm text-muted-foreground py-4 text-center border border-dashed rounded-lg">
+                            尚未配置云端 API，点击右上角「新增云端 API」添加。
+                          </div>
+                        )}
+                        {cloudList.map((cc) => (
+                          <div key={cc.id} className="space-y-3 p-4 rounded-lg bg-background border border-border/50">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <Button
+                                  size="sm"
+                                  variant={cc.active || (!cc.active && cloudList.findIndex((x) => x.active) < 0 && cloudList[0]?.id === cc.id) ? 'default' : 'outline'}
+                                  className="h-6 text-[10px"
+                                  onClick={() => { setActiveCloudRecolorConfig(cc.id); setCloudList(getCloudRecolorConfigs()); }}
+                                  title="设为此云端 API 为当前默认使用"
+                                >
+                                  {cc.active || cloudList.findIndex((x) => x.active) < 0 && cloudList[0]?.id === cc.id ? '✓ 当前使用' : '设为当前'}
+                                </Button>
+                                <Input
+                                  value={cc.name}
+                                  onChange={(e) => patchCloud(cc.id, { name: e.target.value })}
+                                  placeholder="显示名，如 方舟 SAM2.1"
+                                  className="h-6 text-xs font-medium w-40"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => { removeCloudRecolorConfig(cc.id); setCloudList(getCloudRecolorConfigs()); }}
+                                className="text-muted-foreground hover:text-destructive"
+                                title="删除此云端 API"
+                              >
+                                <Trash2 className="size-4" />
+                              </button>
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs text-muted-foreground">接口地址 (Base URL，OpenAI 兼容)</Label>
+                              <Input
+                                value={cc.baseUrl}
+                                onChange={(e) => patchCloud(cc.id, { baseUrl: e.target.value })}
+                                placeholder="https://ark.cn-beijing.volces.com/api/v3"
+                                className="h-9 text-sm font-mono"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs text-muted-foreground">API 密钥</Label>
+                              <div className="flex gap-2">
+                                <div className="flex-1 relative">
+                                  <Input
+                                    type={cloudKeyVisible[cc.id] ? 'text' : 'password'}
+                                    value={cc.apiKey}
+                                    onChange={(e) => patchCloud(cc.id, { apiKey: e.target.value })}
+                                    placeholder="ARK_API_KEY 或等价 key"
+                                    className="h-9 text-sm font-mono pr-10"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setCloudKeyVisible((v) => ({ ...v, [cc.id]: !v[cc.id] }))}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                    aria-label="切换密钥可见"
+                                  >
+                                    {cloudKeyVisible[cc.id] ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs text-muted-foreground">分割模型 (Model ID)</Label>
+                              <Input
+                                value={cc.model}
+                                onChange={(e) => patchCloud(cc.id, { model: e.target.value })}
+                                placeholder="以方舟控制台开通的 SAM2.1 endpoint/model 为准"
+                                className="h-9 text-sm font-mono"
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </TabsContent>
+                  );
+                }
                 const config = getConfigByType(tab.id);
                 if (!config) return null;
                 const isVerified = config.status === 'verified';
