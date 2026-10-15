@@ -302,27 +302,6 @@ export default function LeftSidebar() {
             </Button>
           </div>
 
-          <div className="border-t border-border/40 pt-3 space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">参数预设</label>
-            <Select value={selectedPreset} onValueChange={setSelectedPreset}>
-              <SelectTrigger className="h-9 text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {presets.map((p) => (
-                  <SelectItem key={p.id} value={p.id} className="text-sm">
-                    {p.name} {p.isSystem && <Badge variant="outline" className="ml-2 text-[10px]">系统</Badge>}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <div className="grid grid-cols-3 gap-1.5">
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleApplyPreset}>应用预设</Button>
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setSavePresetOpen(true)}>保存为新预设</Button>
-              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleDuplicatePreset}>复制预设</Button>
-            </div>
-          </div>
-
           {/* Share Project */}
           <div className="flex items-center justify-between border-t border-border/40 pt-3">
             <div className="flex items-center gap-2">
@@ -734,24 +713,6 @@ export default function LeftSidebar() {
         </DialogContent>
       </Dialog>
 
-      {/* Save Preset Dialog */}
-      <Dialog open={savePresetOpen} onOpenChange={setSavePresetOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>保存为新预设</DialogTitle>
-          </DialogHeader>
-          <Input
-            value={newPresetName}
-            onChange={(e) => setNewPresetName(e.target.value)}
-            placeholder="请输入预设名称"
-            className="mt-2"
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setSavePresetOpen(false)}>取消</Button>
-            <Button onClick={handleSavePreset}>保存</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </aside>
   );
 }

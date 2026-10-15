@@ -1,2 +1,1 @@
-public/human-parsing/cloth_b2.onnx filter=lfs diff=lfs merge=lfs -text
 scripts/_b2_clothes.onnx filter=lfs diff=lfs merge=lfs -text

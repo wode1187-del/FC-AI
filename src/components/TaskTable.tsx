@@ -84,7 +84,8 @@ import { Image } from '@/components/ui/image';
 import { logger, scopedStorage } from '@lark-apaas/client-toolkit-lite';
 import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
-import MaskEditor, { runRecolorInWorker } from '@/components/MaskEditor';
+import MaskEditor from '@/components/MaskEditor';
+import { runRecolorLocal } from '@/lib/recolor';
 import { useApp } from '@/context/AppContext';
 import { isVideoModel, getFeatureTemplate, getVideoDurationLimit } from '@/data/featureTemplates';
 import { VIDEO_PROMPT_PRESETS, IMAGE_PROMPT_PRESETS } from '@/data/promptPresets';
@@ -143,7 +144,7 @@ const TaskPromptCell = memo(function TaskPromptCell({
         const ctx = canvas.getContext('2d')!;
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const out = await runRecolorInWorker(id, hex);
+        const out = await runRecolorLocal(id, hex);
         canvas.width = out.width; canvas.height = out.height;
         ctx.putImageData(out, 0, 0);
         const url = canvas.toDataURL('image/jpeg', 0.92);

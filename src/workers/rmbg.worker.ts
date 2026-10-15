@@ -88,6 +88,9 @@ function getSession(): Promise<any> {
     sessionPromise = (async () => {
       if (ort?.env?.wasm) {
         (ort.env as any).wasm.wasmPaths = WASM_BASE;
+        // 176MB 大模型：proxy 独立 worker 加载以分配更大堆，避免 protobuf parsing failed（内存不足）
+        (ort.env as any).wasm.proxy = true;
+        (ort.env as any).wasm.numThreads = 1;
       }
       const bytes = await fetchModelBytes();
       const session = await ort.InferenceSession.create(bytes, {
@@ -219,6 +222,9 @@ function getClothSession(): Promise<any> {
     clothSessionPromise = (async () => {
       if (ort?.env?.wasm) {
         (ort.env as any).wasm.wasmPaths = WASM_BASE;
+        // 105MB 衣服分割模型：proxy 独立 worker 加载分配更大堆，避免 protobuf parsing failed
+        (ort.env as any).wasm.proxy = true;
+        (ort.env as any).wasm.numThreads = 1;
       }
       const bytes = await fetchClothBytes();
       const session = await ort.InferenceSession.create(bytes, {
