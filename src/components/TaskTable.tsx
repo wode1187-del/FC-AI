@@ -87,7 +87,7 @@ import ImageLightbox from '@/components/ImageLightbox';
 import ImageEditor from '@/components/ImageEditor';
 import MaskEditor from '@/components/MaskEditor';
 import { runRecolorLocal } from '@/lib/recolor';
-import { runCloudRecolor, getCloudRecolorConfig } from '@/lib/cloudRecolor';
+import { runCloudRecolor, runSeedreamRecolor, getCloudRecolorConfig } from '@/lib/cloudRecolor';
 import { useApp } from '@/context/AppContext';
 import { isVideoModel, getFeatureTemplate, getVideoDurationLimit } from '@/data/featureTemplates';
 import { VIDEO_PROMPT_PRESETS, IMAGE_PROMPT_PRESETS } from '@/data/promptPresets';
@@ -166,9 +166,14 @@ const TaskPromptCell = memo(function TaskPromptCell({
     const hex = (task.prompt.match(/【选色】服装颜色改为(?:[^（】]*（)?(#[0-9A-Fa-f]{6})/))?.[1] || '#9B5DE5';
     const ref = task.referenceImages?.[0];
     if (!ref?.url) { toast.warning('请先上传参考图（本功能需原图作为素材）'); return; }
-    const cfg = getCloudRecolorConfig();
+    const cfg = getCloudRecolorConfig('segment');
     if (!cfg || !cfg.baseUrl || !cfg.apiKey || !cfg.model) {
-      toast.error('未配置云端换色 API，请到「接口配置 → 云端换色」填写 Base URL / API Key / Model 后重试');
+      toast.error('未配置「分割蒙版 (SAM2.1)」云端换色 API：请到「接口配置 → 云端换色」把模式选为「分割蒙版 (SAM2.1)」并填写 Base URL / API Key / Model 后重试');
+      return;
+    }
+    // 生成/编辑模型（seedream/jimeng 等）不支持分割路径，引导用「Seedream 换色」
+    if (/seedream|jimeng|generation|imagine|edit/i.test(cfg.model)) {
+      toast.warning(`「${cfg.model}」是生成/编辑模型，不能用于「分割蒙版」换色。请到「接口配置 → 云端换色」把这条 API 的模式改为「Seedream 编辑重绘」，然后用「Seedream 换色」按钮；或改填真正的 SAM2.1 分割模型。`);
       return;
     }
     toast.info('正在云端精准换色（云端分割衣服蒙版 + 保留明度）…');
@@ -194,6 +199,48 @@ const TaskPromptCell = memo(function TaskPromptCell({
         }] });
         toast.success('云端精准换色完成（云端蒙版 · 保留纹理）');
       } catch (e) { toast.error('云端精准换色失败：' + String(e)); }
+    };
+    img.onerror = () => toast.error('参考图加载失败');
+    img.src = ref.url;
+  }
+  // Seedream 编辑换色：走 /images/generations 交互编辑（模型重绘衣物颜色），复用云端换色 API 配置
+  function seedreamRecolorHere() {
+    const hex = (task.prompt.match(/【选色】服装颜色改为(?:[^（】]*（)?(#[0-9A-Fa-f]{6})/))?.[1] || '#9B5DE5';
+    const ref = task.referenceImages?.[0];
+    if (!ref?.url) { toast.warning('请先上传参考图（本功能需原图作为素材）'); return; }
+    // 复用云端换色 API 配置（Base URL / API Key / Model 填 Seedream 编辑模型，如 seedream-v5-pro/layer-decomposition）
+    const cfg = getCloudRecolorConfig('edit');
+    if (!cfg || !cfg.baseUrl || !cfg.apiKey || !cfg.model) {
+      toast.error('未配置「Seedream 编辑」换色 API：请到「接口配置 → 云端换色」把模式选为「Seedream 编辑重绘」并填写 Base URL / API Key / Model（如 seedream-v5-pro/layer-decomposition）后重试');
+      return;
+    }
+    toast.info(`正在 Seedream 编辑换色（${cfg.model}，模型重绘衣物颜色）…`);
+    const img = new window.Image();
+    img.onload = async () => {
+      try {
+        const c2 = document.createElement('canvas');
+        c2.width = img.width; c2.height = img.height;
+        const ctx2 = c2.getContext('2d')!;
+        ctx2.drawImage(img, 0, 0);
+        const id = ctx2.getImageData(0, 0, c2.width, c2.height);
+        let bbox;
+        const bb = task.seedreamBBox?.trim();
+        if (bb) {
+          const parts = bb.split(/[\s,，]+/).map(Number);
+          if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) bbox = { x1: parts[0], y1: parts[1], x2: parts[2], y2: parts[3] };
+        }
+        const out = await runSeedreamRecolor(id, hex, { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, bbox }, task.cloudPrompt);
+        const c3 = document.createElement('canvas');
+        c3.width = out.width; c3.height = out.height;
+        c3.getContext('2d')!.putImageData(out, 0, 0);
+        const url = c3.toDataURL('image/jpeg', 0.92);
+        const now = Date.now();
+        updateTask(task.id, { results: [...(task.results || []), {
+          id: `seedream-recolor-${now}`, url, model: cfg.model || 'seedream', prompt: `Seedream 编辑换色 → ${hex}`,
+          createdAt: now, width: out.width, height: out.height, type: 'image',
+        }] });
+        toast.success('Seedream 编辑换色完成（模型重绘）');
+      } catch (e) { toast.error('Seedream 编辑换色失败：' + String(e)); }
     };
     img.onerror = () => toast.error('参考图加载失败');
     img.src = ref.url;
@@ -972,6 +1019,9 @@ const TaskPromptCell = memo(function TaskPromptCell({
             <Button size="sm" variant="outline" className="h-6 text-[10px] bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/30 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/20" onClick={cloudRecolorHere} title="云端大模型出衣服蒙版+保留明度只改色相，需先在接口配置-云端换色填好 API">
               <CloudLightning className="size-3 mr-1" />云端精准换色<span className="text-[8px] opacity-70 ml-0.5">（云端蒙版）</span>
             </Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px] bg-fuchsia-50 dark:bg-fuchsia-500/10 border-fuchsia-200 dark:border-fuchsia-500/30 text-fuchsia-600 dark:text-fuchsia-300 hover:bg-fuchsia-100 dark:hover:bg-fuchsia-500/20" onClick={seedreamRecolorHere} title="走 Seedream 5.0 Pro 交互编辑/图层分解，模型重绘衣物颜色（需模型支持）">
+              <Sparkles className="size-3 mr-1" />Seedream 换色<span className="text-[8px] opacity-70 ml-0.5">（模型重绘）</span>
+            </Button>
             {[
               { group: '基础色', colors: [
                 { name: '黑色', color: '#000000' },
@@ -1022,6 +1072,16 @@ const TaskPromptCell = memo(function TaskPromptCell({
               placeholder="例：只分割人物上衣/连衣裙，排除腰带、配饰与手臂"
               className="w-full h-7 text-[11px] border border-border rounded px-2"
             />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-muted-foreground whitespace-nowrap">Seedream 衣服区域（可选）</span>
+              <input
+                type="text"
+                value={task.seedreamBBox ?? ''}
+                onChange={(e) => updateTask(task.id, { seedreamBBox: e.target.value })}
+                placeholder="归一化0-999：x1 y1 x2 y2，如 150 150 850 850；留空=全图强约束只改衣服"
+                className="w-full h-7 text-[11px] border border-border rounded px-2"
+              />
+            </div>
           </div>
         </div>
       )}

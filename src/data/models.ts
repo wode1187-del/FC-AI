@@ -111,6 +111,8 @@ export interface ITask {
   customPrompt?: string;
   /** 云端精准换色：发往云端分割模型的识别指令（可含 {point} 占位，留空用默认） */
   cloudPrompt?: string;
+  /** Seedream 换色：衣服区域 bbox（归一化 0-999，格式 "x1 y1 x2 y2"，留空=全图+强约束） */
+  seedreamBBox?: string;
 }
 
 // API 配置

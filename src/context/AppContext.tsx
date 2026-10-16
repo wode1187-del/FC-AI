@@ -618,7 +618,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const tasksRef = useRef<ITask[]>(tasks);
   tasksRef.current = tasks;
   // ① 全局单并发锁：同一时刻只允许一个生成请求在途（防上游限流、防多任务并发重复扣费）
-  const generatingRef = useRef(false);
+  const generatingTaskIdsRef = useRef<Set<string>>(new Set());
   // ③ 渠道健康：各 API 渠道连续失败计数与冷却
   const [channelHealth, setChannelHealth] = useState<Record<string, { fails: number; cooldownUntil: number }>>({});
   const markChannelHealthy = useCallback((cfgId: string) => {
@@ -671,12 +671,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const generateTask = useCallback(async (taskId: string, append = false) => {
     const task = tasksRef.current.find(t => t.id === taskId);
     if (!task || !task.prompt.trim()) return;
-    // ① 全局单并发锁：在途生成时拒绝新的，提示排队
-    if (generatingRef.current) {
-      toast.warning('已有生成任务进行中，请稍候或等待队列完成后再操作');
+    // ① 任务级锁：仅阻止同一任务重复触发，不同任务可并发
+    if (generatingTaskIdsRef.current.has(taskId)) {
+      toast.warning('该任务正在生成中，请稍候');
       return;
     }
-    generatingRef.current = true;
+    generatingTaskIdsRef.current.add(taskId);
 
     // 追加模式：记录本次追加张数，更新总张数用于占位框显示
     const appendCount = task.imageCount || 1;
@@ -1897,13 +1897,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                     } else if (isEditEndpoint && !modelLower.includes('gpt-image') && !isInpaintModel) {
                       fd.append('strength', strength);
                     }
-                    // 双槽 gpt-image：input_fidelity=high 锁定模特五官/身份，避免重新生成新脸
-                    // 【隔离边界】以下逻辑仅属于 gpt-image 系（dualIsOpenAIImage）：
-                    //   gemini/nano-banana 不经过此分支（它们走 generations-json 拼图分支，见 L1843 附近）；
-                    //   修改 gpt 行为只在此分支内进行，禁止改动 gemini/volc 分支。
-                    if (isDualSlotTryon && dualIsOpenAIImage) {
-                      fd.append('input_fidelity', 'high');
-                    }
+                    // input_fidelity 非 OpenAI 标准参数，部分中转（fuyao47 等）会回 400「Unsupported ADX parameters: input_fidelity」。
+                    // gpt-image edits 依赖多张 image 参考图锁定身份，故不再发送该字段。
+                    // 【隔离边界】以下逻辑仅属于 gpt-image 系（dualIsOpenAIImage），不改 gemini/volc 分支。
 
                     // variations 端点不需要 prompt
                     if (!isVarEndpoint && attempt.extraParams.__useMask !== 'true' ? true : !isVarEndpoint) {
@@ -2534,9 +2530,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   if (colorSuffix) promptText = promptText + colorSuffix;
                   fd.append('prompt', promptText);
                 }
-                // 双槽 gpt-image 补齐同样加 input_fidelity=high 锁脸
+                // 双槽 gpt-image 补齐：不再发 input_fidelity（非 OpenAI 标准，fuyao47 等中转会 400）
                 if (isDualSlotTryon && dualIsOpenAIImage) {
-                  fd.append('input_fidelity', 'high');
+                  // input_fidelity 已移除：多张 image 参考图已锁定身份
                 }
                 fd.append('model', String(successVariantBodyForFill.model || ''));
                 if (successVariantBodyForFill.n !== undefined) fd.append('n', '1');
@@ -2665,9 +2661,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   } else if (endpoint.includes('/images/edit')) {
                     fd.append('strength', singleStrength);
                   }
-                  // 双槽 gpt-image：input_fidelity=high 锁脸
+                  // 双槽 gpt-image：不再发 input_fidelity（非 OpenAI 标准，fuyao47 等中转会 400）
                   if (isDualSlotTryon && dualIsOpenAIImage) {
-                    fd.append('input_fidelity', 'high');
+                    // input_fidelity 已移除：多张 image 参考图已锁定身份
                   }
                   singleRequestBody = fd;
                 } else {
@@ -2937,8 +2933,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         durationMs: Date.now() - (t.startedAt || generateStartTime),
       } : t));
     } finally {
-      // ① 释放全局单并发锁
-      generatingRef.current = false;
+      // ① 释放任务级锁
+      generatingTaskIdsRef.current.delete(taskId);
     }
   }, [tasksRef, apiConfigs, allModels, findApiConfigForModel, markChannelUnhealthy, markChannelHealthy]);
 
@@ -3194,12 +3190,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const generateVideoTask = useCallback(async (taskId: string) => {
     const task = tasksRef.current.find(t => t.id === taskId);
     if (!task || !task.prompt.trim()) return;
-    // ① 全局单并发锁
-    if (generatingRef.current) {
-      toast.warning('已有生成任务进行中，请稍候或等待队列完成后再操作');
+    // ① 任务级锁：仅阻止同一任务重复触发，不同任务可并发
+    if (generatingTaskIdsRef.current.has(taskId)) {
+      toast.warning('该任务正在生成中，请稍候');
       return;
     }
-    generatingRef.current = true;
+    generatingTaskIdsRef.current.add(taskId);
 
     const isKling = task.model.startsWith('kling');
     const apiType = isKling ? 'kling' : 'seedance';
@@ -3390,9 +3386,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'failed', errorMsg: msg, completedAt: Date.now(), durationMs: Date.now() - startTime } : t));
     } finally {
-      generatingRef.current = false;
+      generatingTaskIdsRef.current.delete(taskId);
     }
-  }, [tasksRef, apiConfigs, updateTask, setTasks, generatingRef, markChannelHealthy, markChannelUnhealthy]);
+  }, [tasksRef, apiConfigs, updateTask, setTasks, generatingTaskIdsRef, markChannelHealthy, markChannelUnhealthy]);
 
   const verifyApiConfig = useCallback(async (id: string): Promise<boolean> => {
     const config = apiConfigs.find(c => c.id === id);

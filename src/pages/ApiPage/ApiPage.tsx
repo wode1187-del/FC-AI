@@ -325,13 +325,46 @@ export default function ApiPage() {
                               </div>
                             </div>
                             <div className="space-y-1.5">
-                              <Label className="text-xs text-muted-foreground">分割模型 (Model ID)</Label>
+                              <Label className="text-xs text-muted-foreground">模式</Label>
+                              <div className="flex gap-1.5">
+                                {([['segment', '分割蒙版 (SAM2.1)'], ['edit', 'Seedream 编辑重绘']] as const).map(([m, lbl]) => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    onClick={() => patchCloud(cc.id, { mode: m })}
+                                    className={`px-2 h-8 text-xs rounded-md border ${(cc.mode ?? 'segment') === m ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-accent border-border'}`}
+                                  >
+                                    {lbl}
+                                  </button>
+                                ))}
+                              </div>
+                              <p className="text-[11px] text-muted-foreground">
+                                {(cc.mode ?? 'segment') === 'edit'
+                                  ? 'Seedream 编辑：模型重绘衣物颜色，对应「Seedream 换色」按钮'
+                                  : 'SAM2.1 分割：出衣服蒙版 + 保纹理只改色，对应「云端精准换色」按钮'}
+                              </p>
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-xs text-muted-foreground">{(cc.mode ?? 'segment') === 'edit' ? 'Seedream 模型 (Model ID)' : '分割模型 (Model ID)'}</Label>
                               <Input
+                                list={`cloud-models-${cc.id}`}
                                 value={cc.model}
                                 onChange={(e) => patchCloud(cc.id, { model: e.target.value })}
-                                placeholder="以方舟控制台开通的 SAM2.1 endpoint/model 为准"
+                                placeholder={(cc.mode ?? 'segment') === 'edit' ? 'seedream-v5-pro 或 /layer-decomposition' : 'SAM2.1 分割模型 id，可下拉搜索已加载模型'}
                                 className="h-9 text-sm font-mono"
                               />
+                              <datalist id={`cloud-models-${cc.id}`}>
+                                {Array.from(new Set(
+                                  allModels
+                                    .filter((m) => ((cc.mode ?? 'segment') === 'edit'
+                                      ? /seedream|jimeng|doubao-seedream|imagine|layer/i
+                                      : /sam|segment|mask|clothes|human|decompos|rembg|layer/i).test(m.id))
+                                    .map((m) => m.id),
+                                ))
+                                  .concat(cc.model ? [cc.model] : [])
+                                  .map((mid) => <option key={mid} value={mid} />)}
+                              </datalist>
+                              <p className="text-[11px] text-muted-foreground">仅显示当前模式相关的模型（Seedream/即梦 或 SAM2.1/分割），可输入或下拉搜索选择。</p>
                             </div>
                           </div>
                         ))}
